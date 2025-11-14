@@ -221,11 +221,17 @@ def udp_listener_worker(arg=None):
         
         except socket.timeout:
             # Timeout is expected, continue loop
+            timeout_count += 1
+            if timeout_count % 1000 == 0:  # Log every 100 timeouts (~10 seconds)
+                print(f"[UDP] Timeout waiting for packets (timeout_count={timeout_count}, packets_received={packet_count})")
             continue
         except Exception as e:
             if not global_interrupted.is_set():
-                print(f"UDP Listener: Receive error - {e}")
-            break
+                print(f"[UDP ERROR] Receive error: {e}")
+                import traceback
+                traceback.print_exc()
+            time.sleep(0.1)
+            continue
     
     print("UDP listener worker stopped")
     return None
