@@ -477,14 +477,20 @@ def audio_output_worker(audio_stream: AudioStream):
                 output_count += 1
                 if output_count % 1000 == 0:  # Log every ~10 seconds
                     rms = np.sqrt(np.mean(samples_to_play**2))
-                    print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Playing audio (RMS={rms:.4f}, samples={len(samples_to_play)})")
+                    with audio_stream.output_jitter.mutex:
+                        jitter_frames = audio_stream.output_jitter.frame_count
+                    print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing audio (RMS={rms:.4f}, "
+                          f"samples={len(samples_to_play)}, jitter_frames={jitter_frames})")
             else:
                 # No audio available, play silence
                 silence = np.zeros(1024, dtype=np.float32)
                 audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
                 silence_count += 1
                 if silence_count % 1000 == 0:  # Log every ~10 seconds
-                    print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Playing silence (jitter_frames={audio_stream.output_jitter.frame_count}, passthrough_active={is_passthrough_target and tone_detect.global_tone_detection.passthrough_active})")
+                    with audio_stream.output_jitter.mutex:
+                        jitter_frames = audio_stream.output_jitter.frame_count
+                    print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing silence "
+                          f"(jitter_frames={jitter_frames}, passthrough_active={is_passthrough_target and tone_detect.global_tone_detection.passthrough_active})")
                 if not is_passthrough_target or not tone_detect.global_tone_detection.passthrough_active:
                     time.sleep(0.01)  # Small delay when no audio
             
