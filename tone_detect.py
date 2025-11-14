@@ -10,6 +10,8 @@ from echostream import (
     SAMPLE_RATE, FREQ_BINS, SAMPLES_PER_FRAME
 )
 from scipy import signal
+from scipy.signal import hanning
+from numpy.fft import rfft
 import config
 import mqtt
 
@@ -61,6 +63,11 @@ class ToneDetectionState:
         self.tone_b_tracking_start = 0
         self.active_tone_def = None  # Currently active tone definition
         self.passthrough_active = False
+        
+        # Audio buffer for sliding window analysis (like ToneDetect project)
+        self.audio_buffer = []  # List of float32 samples
+        self.max_buffer_samples = int(SAMPLE_RATE * 10)  # 10 seconds max buffer
+        self.last_detect_time = 0  # Prevent duplicate detections
 
 global_tone_detection = ToneDetectionState()
 
@@ -124,6 +131,48 @@ def set_tone_config(threshold: float, gain: float, db_threshold: int,
     # Configuration is stored in config module
     print(f"Tone config set: threshold={threshold}, gain={gain}, db={db_threshold}")
     return True
+
+def parabolic(f, x):
+    """Quadratic interpolation for estimating the true position of an
+    inter-sample maximum when nearby samples are known.
+    f is a vector and x is an index for that vector.
+    Returns (vx, vy), the coordinates of the vertex of a parabola that goes
+    through point x and its two neighbors.
+    """
+    if x == 0 or x == len(f) - 1:
+        return float(x), float(f[x])
+    xv = 1 / 2. * (f[x - 1] - f[x + 1]) / (f[x - 1] - 2 * f[x] + f[x + 1]) + x
+    yv = f[x] - 1 / 4. * (f[x - 1] - f[x + 1]) * (xv - x)
+    return xv, yv
+
+def freq_from_fft(sig, fs=SAMPLE_RATE):
+    """
+    Estimate frequency from peak of FFT using parabolic interpolation
+    (from ToneDetect project)
+    """
+    if len(sig) < 2:
+        return 0.0
+    
+    # Compute Fourier transform of windowed signal
+    windowed = sig * hanning(len(sig))
+    f = rfft(windowed)
+    
+    # Find the peak and interpolate to get a more accurate peak
+    magnitudes = np.abs(f)
+    i = np.argmax(magnitudes)  # Just use this for less-accurate, naive version
+    
+    if i == 0 or i >= len(magnitudes) - 1:
+        # Can't interpolate at edges
+        return fs * i / len(windowed)
+    
+    # Use parabolic interpolation for more accuracy
+    try:
+        true_i = parabolic(np.log(magnitudes + 1e-10), i)[0]  # Add small value to avoid log(0)
+    except:
+        true_i = float(i)
+    
+    # Convert to equivalent frequency
+    return fs * true_i / len(windowed)
 
 def is_frequency_in_range(detected_freq: float, target_freq: float, range_hz: int) -> bool:
     """Check if detected frequency is within range of target"""
@@ -190,140 +239,130 @@ def trigger_tone_passthrough(tone_def: ToneDefinition):
     audio.set_passthrough_output_mode(True)
 
 def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> bool:
-    """Process audio using Python approach with full tone sequence detection"""
+    """Process audio using sliding window approach (like ToneDetect project)"""
     if not global_tone_detection.active:
         return False
     
-    # Simple FFT-based frequency detection
-    if sample_count < FFT_SIZE:
-        return False
+    current_time_ms = int(time.time() * 1000)
+    
+    # Add samples to sliding window buffer
+    with global_tone_detection.mutex:
+        global_tone_detection.audio_buffer.extend(samples[:sample_count])
+        # Keep only last max_buffer_samples
+        if len(global_tone_detection.audio_buffer) > global_tone_detection.max_buffer_samples:
+            global_tone_detection.audio_buffer = global_tone_detection.audio_buffer[-global_tone_detection.max_buffer_samples:]
     
     # Debug: Log when processing audio (occasionally)
     static_process_count = getattr(process_audio_python_approach, '_process_count', 0)
     process_audio_python_approach._process_count = static_process_count + 1
     if static_process_count % 1000 == 0:  # Log every 1000th call (~every 10 seconds at 48kHz)
         valid_tones = sum(1 for td in global_tone_detection.tone_definitions if td.valid)
+        buffer_len = len(global_tone_detection.audio_buffer)
         if valid_tones == 0:
-            print("[TONE DEBUG] Processing audio but no tone definitions loaded!")
+            print(f"[TONE DEBUG] Processing audio but no tone definitions loaded! (buffer: {buffer_len} samples)")
         else:
-            print(f"[TONE DEBUG] Processing audio, {valid_tones} tone definition(s) loaded")
+            print(f"[TONE DEBUG] Processing audio, {valid_tones} tone definition(s) loaded (buffer: {buffer_len} samples)")
     
-    current_time_ms = int(time.time() * 1000)
-    
-    # Take FFT
-    fft_result = np.fft.rfft(samples[:FFT_SIZE])
-    magnitudes = np.abs(fft_result)
-    
-    # Find peak frequencies (use higher threshold to reduce false positives)
-    peak_threshold = np.max(magnitudes) * 0.2
-    peak_indices = signal.find_peaks(magnitudes, height=peak_threshold)[0]
-    
-    if len(peak_indices) == 0:
-        # No peaks found, check for timeout
-        if global_tone_detection.tone_sequence_active:
-            time_since_tone_a = current_time_ms - global_tone_detection.tone_a_start_time
-            if time_since_tone_a > 5000:  # 5 second timeout
-                print("[TONE] Sequence reset due to timeout")
-                reset_tone_tracking()
-                with global_tone_detection.mutex:
-                    global_tone_detection.tone_sequence_active = False
+    # Check volume threshold first (like ToneDetect)
+    # Calculate RMS volume
+    if len(global_tone_detection.audio_buffer) < SAMPLE_RATE:  # Need at least 1 second
         return False
     
-    # Convert bin indices to frequencies
-    frequencies = peak_indices * SAMPLE_RATE / FFT_SIZE
+    # Get threshold from config
+    threshold_db = -20  # Default
+    try:
+        import config
+        for i in range(MAX_CHANNELS):
+            channel_config = config.get_channel_config(i)
+            if channel_config and channel_config.valid and channel_config.tone_detect:
+                threshold_db = channel_config.tone_config.db_threshold
+                break
+    except:
+        pass
     
-    # Constants for hit/miss tracking
-    HIT_REQUIRED = 3
-    MISS_REQUIRED = 5
-    GRACE_MS = 200
+    # Calculate volume from recent samples
+    recent_samples = np.array(global_tone_detection.audio_buffer[-SAMPLE_RATE:])  # Last 1 second
+    rms = np.sqrt(np.mean(recent_samples**2))
+    volume_db = 20 * np.log10(rms + 1e-10)  # Add small value to avoid log(0)
     
-    # Check each tone definition
+    if volume_db < threshold_db:
+        # Volume too low, skip processing
+        return False
+    
+    # Get unique length groups from tone definitions (like ToneDetect)
+    lengths = []
     for tone_def in global_tone_detection.tone_definitions:
-        if not tone_def.valid:
+        if tone_def.valid:
+            l_a = tone_def.tone_a_length_ms / 1000.0  # Convert to seconds
+            l_b = tone_def.tone_b_length_ms / 1000.0
+            lengths.append((l_a, l_b))
+    
+    # Remove duplicates and sort by total length (longest first)
+    unique_lengths = sorted(list(set(lengths)), key=lambda x: x[0] + x[1], reverse=True)
+    
+    if not unique_lengths:
+        return False
+    
+    # Process each unique length group
+    for l_a, l_b in unique_lengths:
+        # Need at least l_a + l_b seconds of audio
+        required_samples = int((l_a + l_b) * SAMPLE_RATE)
+        if len(global_tone_detection.audio_buffer) < required_samples:
             continue
         
-        # Check for Tone A first
-        if not global_tone_detection.tone_a_confirmed:
-            # Check if Tone B appears before Tone A is confirmed - invalid sequence
-            tone_b_detected = False
-            for freq in frequencies:
-                if is_frequency_in_range(freq, tone_def.tone_b_freq, tone_def.tone_b_range_hz):
-                    tone_b_detected = True
-                    break
-            
-            if tone_b_detected:
-                print(f"[TONE] INVALID SEQUENCE: Tone B ({tone_def.tone_b_freq} Hz) detected before Tone A confirmed - resetting")
-                reset_tone_tracking()
+        # Extract tone A and tone B segments (like ToneDetect)
+        buf_array = np.array(global_tone_detection.audio_buffer)
+        tone_a_segment = buf_array[-(l_a + l_b) * SAMPLE_RATE:-int(l_b * SAMPLE_RATE)]
+        tone_b_segment = buf_array[-int(l_b * SAMPLE_RATE):]
+        
+        if len(tone_a_segment) < SAMPLE_RATE * 0.1 or len(tone_b_segment) < SAMPLE_RATE * 0.1:
+            continue
+        
+        # Detect frequencies using parabolic interpolation (like ToneDetect)
+        try:
+            a_tone_freq = freq_from_fft(tone_a_segment, SAMPLE_RATE)
+            b_tone_freq = freq_from_fft(tone_b_segment, SAMPLE_RATE)
+        except Exception as e:
+            if static_process_count % 100 == 0:
+                print(f"[TONE DEBUG] FFT error: {e}")
+            continue
+        
+        # Check against tone definitions with matching lengths
+        tolerance = 10  # Default tolerance in Hz
+        detected = False
+        
+        for tone_def in global_tone_detection.tone_definitions:
+            if not tone_def.valid:
                 continue
             
-            # Check for Tone A
-            tone_a_detected = False
-            for freq in frequencies:
-                if is_frequency_in_range(freq, tone_def.tone_a_freq, tone_def.tone_a_range_hz):
-                    tone_a_detected = True
-                    break
+            # Check if lengths match
+            if abs(tone_def.tone_a_length_ms / 1000.0 - l_a) > 0.1 or \
+               abs(tone_def.tone_b_length_ms / 1000.0 - l_b) > 0.1:
+                continue
             
-            if tone_a_detected:
-                # Start or continue tracking Tone A
-                if not global_tone_detection.tone_a_tracking:
-                    global_tone_detection.tone_a_tracking = True
-                    global_tone_detection.tone_a_tracking_start = current_time_ms
-                    print(f"[TONE] Tone A tracking started: {tone_def.tone_a_freq} Hz (ID: {tone_def.tone_id})")
-                else:
-                    # Check if duration requirement is met
-                    if check_tone_duration(False, current_time_ms, tone_def):
-                        with global_tone_detection.mutex:
-                            global_tone_detection.tone_a_confirmed = True
-                            global_tone_detection.current_tone_a_detected = True
-                            global_tone_detection.tone_a_start_time = current_time_ms
-                            global_tone_detection.tone_sequence_active = True
-                        print(f"[TONE CONFIRMED] Tone A confirmed! ({tone_def.tone_a_freq} Hz ±{tone_def.tone_a_range_hz} Hz, {tone_def.tone_a_length_ms} ms duration)")
-            else:
-                # Tone A lost - reset if grace period expired
-                if global_tone_detection.tone_a_tracking:
-                    elapsed = current_time_ms - global_tone_detection.tone_a_tracking_start
-                    if elapsed > GRACE_MS:
-                        print("[TONE] Tone A tracking reset - frequency lost")
-                        with global_tone_detection.mutex:
-                            global_tone_detection.tone_a_tracking = False
-                            global_tone_detection.tone_a_tracking_start = 0
+            # Check if frequencies match (use tone_a_range and tone_b_range as tolerance)
+            a_match = abs(tone_def.tone_a_freq - a_tone_freq) <= max(tone_def.tone_a_range_hz, tolerance)
+            b_match = abs(tone_def.tone_b_freq - b_tone_freq) <= max(tone_def.tone_b_range_hz, tolerance)
+            
+            # Prevent duplicate detections (like ToneDetect)
+            time_since_last = current_time_ms - global_tone_detection.last_detect_time
+            max_tone_len_ms = max(tone_def.tone_a_length_ms, tone_def.tone_b_length_ms)
+            
+            if a_match and b_match and time_since_last > max_tone_len_ms:
+                detected = True
+                print(f"[TONE DETECTED] Tone pair detected! A: {a_tone_freq:.1f} Hz (target: {tone_def.tone_a_freq} Hz), "
+                      f"B: {b_tone_freq:.1f} Hz (target: {tone_def.tone_b_freq} Hz) - ID: {tone_def.tone_id}")
+                
+                global_tone_detection.last_detect_time = current_time_ms
+                
+                # Trigger passthrough immediately (both tones detected at once)
+                trigger_tone_passthrough(tone_def)
+                break
         
-        # Check for Tone B (only if Tone A is confirmed)
-        elif not global_tone_detection.tone_b_confirmed:
-            tone_b_detected = False
-            for freq in frequencies:
-                if is_frequency_in_range(freq, tone_def.tone_b_freq, tone_def.tone_b_range_hz):
-                    tone_b_detected = True
-                    break
-            
-            if tone_b_detected:
-                # Start or continue tracking Tone B
-                if not global_tone_detection.tone_b_tracking:
-                    global_tone_detection.tone_b_tracking = True
-                    global_tone_detection.tone_b_tracking_start = current_time_ms
-                    print(f"[TONE] Tone B tracking started: {tone_def.tone_b_freq} Hz (ID: {tone_def.tone_id})")
-                else:
-                    # Check if duration requirement is met
-                    if check_tone_duration(True, current_time_ms, tone_def):
-                        with global_tone_detection.mutex:
-                            global_tone_detection.tone_b_confirmed = True
-                            global_tone_detection.current_tone_b_detected = True
-                            global_tone_detection.tone_b_start_time = current_time_ms
-                        
-                        print(f"[TONE CONFIRMED] Tone B confirmed! ({tone_def.tone_b_freq} Hz ±{tone_def.tone_b_range_hz} Hz, {tone_def.tone_b_length_ms} ms duration)")
-                        print(f"[TONE ALERT] Complete alert pair confirmed: Tone A={tone_def.tone_a_freq} Hz, Tone B={tone_def.tone_b_freq} Hz")
-                        
-                        # Both tones confirmed - trigger passthrough
-                        trigger_tone_passthrough(tone_def)
-            else:
-                # Tone B lost - reset if grace period expired
-                if global_tone_detection.tone_b_tracking:
-                    elapsed = current_time_ms - global_tone_detection.tone_b_tracking_start
-                    if elapsed > GRACE_MS:
-                        print("[TONE] Tone B tracking reset - frequency lost")
-                        with global_tone_detection.mutex:
-                            global_tone_detection.tone_b_tracking = False
-                            global_tone_detection.tone_b_tracking_start = 0
+        # Debug: Log detected frequencies
+        if static_process_count % 100 == 0:
+            print(f"[TONE DEBUG] Freq: A: {a_tone_freq:.1f} Hz, B: {b_tone_freq:.1f} Hz, "
+                  f"length: {l_a:.1f}s & {l_b:.1f}s, vol: {volume_db:.1f} dB")
     
     # Check if recording timer expired
     if global_tone_detection.recording_active:
