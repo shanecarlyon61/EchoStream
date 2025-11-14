@@ -157,11 +157,11 @@ def udp_listener_worker(arg=None):
                                 break
                         
                         if not target_stream:
-                            if udp_debug_enabled():
-                                print(f"UDP Listener: No active channel found for '{channel_id}'")
+                            # Log missing channel occasionally to avoid spam
+                            if static_audio_count[channel_id] <= 5 or static_audio_count[channel_id] % 500 == 0:
                                 active_channels = [audio.channels[i].audio.channel_id 
                                                  for i in range(MAX_CHANNELS) if audio.channels[i].active]
-                                print(f"UDP Listener: Active channels: {active_channels}")
+                                print(f"[UDP ERROR] Channel {channel_id} not found! Active channels: {active_channels}")
                             continue
                         
                         # Decode base64 data
