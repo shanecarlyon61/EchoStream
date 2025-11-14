@@ -151,6 +151,10 @@ def load_complete_config() -> bool:
                     # Load tone definitions (alert_tones array)
                     import tone_detect
                     alert_tones = tone_detect_config_obj.get('alert_tones', [])
+                    if alert_tones:
+                        print(f"[CONFIG] Found {len(alert_tones)} tone definition(s) in alert_tones array")
+                    else:
+                        print("[CONFIG] WARNING: No alert_tones array found in tone_detect_configuration - tone detection will not work!")
                     tones_loaded = 0
                     for tone_obj in alert_tones:
                         tone_id = tone_obj.get('tone_id', '')

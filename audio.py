@@ -284,6 +284,15 @@ def audio_input_worker(audio_stream: AudioStream):
                     global_shared_buffer.sample_count = sample_count
                     global_shared_buffer.valid = True
                     global_shared_buffer.data_ready.notify_all()
+                
+                # Debug: Log occasionally that we're writing to shared buffer
+                static_buffer_write_count = getattr(audio_input_worker, '_buffer_write_count', {})
+                if audio_stream.channel_id not in static_buffer_write_count:
+                    static_buffer_write_count[audio_stream.channel_id] = 0
+                static_buffer_write_count[audio_stream.channel_id] += 1
+                audio_input_worker._buffer_write_count = static_buffer_write_count
+                if static_buffer_write_count[audio_stream.channel_id] % 1000 == 0:
+                    print(f"[AUDIO DEBUG] Writing audio to shared buffer for tone detection (channel {audio_stream.channel_id}, count={static_buffer_write_count[audio_stream.channel_id]})")
             
             # Accumulate samples for EchoStream transmission
             for sample in audio_data:

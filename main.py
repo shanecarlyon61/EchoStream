@@ -171,6 +171,7 @@ def main():
         
         print("[INFO] Tone detection thread started")
         
+        process_count = 0
         while not global_interrupted.is_set():
             try:
                 # Wait for data in shared buffer
@@ -185,6 +186,14 @@ def main():
                         
                         # Process audio
                         tone_detect.process_audio_python_approach(samples, sample_count)
+                        process_count += 1
+                    else:
+                        # Debug: Log if buffer is empty
+                        if process_count == 0:
+                            static_empty_count = getattr(tone_detection_worker, '_empty_count', 0)
+                            tone_detection_worker._empty_count = static_empty_count + 1
+                            if static_empty_count % 1000 == 0:  # Log every 1000th empty check
+                                print(f"[TONE DEBUG] Shared buffer empty (valid={audio.global_shared_buffer.valid}, count={audio.global_shared_buffer.sample_count})")
                 
                 time.sleep(0.01)  # Small delay to avoid busy waiting
             except Exception as e:
