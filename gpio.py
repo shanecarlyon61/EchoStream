@@ -121,7 +121,7 @@ def gpio_monitor_worker(arg=None):
                 print(f"Channel {global_channel_ids[2]} audio ENABLED (PIN 16 was already active)")
                 break
     
-    if gpio_18_state == 0:
+    if gpio_18_state == 0 and global_channel_count > 3:
         for i in range(4):
             if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
                 audio.channels[i].audio.gpio_active = 1
@@ -193,14 +193,16 @@ def gpio_monitor_worker(arg=None):
                 gpio_18_state = curr_val_18
                 print(f"PIN 18: {'ACTIVE' if curr_val_18 == 0 else 'INACTIVE'}")
                 
-            for i in range(4):
-                if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
-                    audio.channels[i].audio.gpio_active = 1 if curr_val_18 == 0 else 0
-                    print(f"Channel {global_channel_ids[3]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                    break
-            
-            import websocket
-            websocket.send_websocket_transmit_event(global_channel_ids[3], 1 if curr_val_18 == 0 else 0)
+                # Only process if channel 3 exists
+                if global_channel_count > 3:
+                    for i in range(4):
+                        if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
+                            audio.channels[i].audio.gpio_active = 1 if curr_val_18 == 0 else 0
+                            print(f"Channel {global_channel_ids[3]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                            break
+                    
+                    import websocket
+                    websocket.send_websocket_transmit_event(global_channel_ids[3], 1 if curr_val_18 == 0 else 0)
             
             # Display status every 10 seconds (30 iterations * 100ms = 3 seconds, adjust to 100 for 10 seconds)
             status_counter += 1
@@ -209,7 +211,10 @@ def gpio_monitor_worker(arg=None):
                 print(f"PIN 38 (GPIO 20): {'ACTIVE' if curr_val_38 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[0]})")
                 print(f"PIN 40 (GPIO 21): {'ACTIVE' if curr_val_40 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[1]})")
                 print(f"PIN 16 (GPIO 23): {'ACTIVE' if curr_val_16 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[2]})")
-                print(f"PIN 18 (GPIO 24): {'ACTIVE' if curr_val_18 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[3]})")
+                if global_channel_count > 3:
+                    print(f"PIN 18 (GPIO 24): {'ACTIVE' if curr_val_18 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[3]})")
+                else:
+                    print(f"PIN 18 (GPIO 24): {'ACTIVE' if curr_val_18 == 0 else 'INACTIVE'} (Channel: N/A)")
                 
                 # Add recording status
                 import tone_detect

@@ -101,8 +101,12 @@ def setup_audio_for_channel(audio_stream: AudioStream) -> bool:
     try:
         # Setup Opus encoder
         audio_stream.encoder = opuslib.Encoder(SAMPLE_RATE, 1, opuslib.APPLICATION_VOIP)
-        audio_stream.encoder.bitrate = 64000
-        audio_stream.encoder.vbr = True
+        try:
+            audio_stream.encoder.bitrate = 64000
+            audio_stream.encoder.vbr = True
+        except AttributeError:
+            # Some opuslib versions use different API
+            pass
         
         # Setup Opus decoder
         audio_stream.decoder = opuslib.Decoder(SAMPLE_RATE, 1)
@@ -195,6 +199,122 @@ def audio_output_callback(in_data, frame_count, time_info, status):
     output = np.zeros(frame_count, dtype=np.float32)
     return (output.tobytes(), pyaudio.paContinue)
 
+def audio_input_worker(audio_stream: AudioStream):
+    """Audio input worker thread - captures audio and sends it"""
+    from echostream import global_interrupted
+    import udp
+    
+    print(f"[AUDIO] Input worker started for channel {audio_stream.channel_id}")
+    
+    while not global_interrupted.is_set() and audio_stream.transmitting:
+        if not audio_stream.gpio_active or audio_stream.input_stream is None:
+            time.sleep(0.1)
+            continue
+        
+        try:
+            # Read audio data
+            data = audio_stream.input_stream.read(1024, exception_on_overflow=False)
+            audio_data = np.frombuffer(data, dtype=np.float32)
+            
+            # Accumulate samples
+            for sample in audio_data:
+                audio_stream.input_buffer[audio_stream.input_buffer_pos] = sample
+                audio_stream.input_buffer_pos += 1
+                
+                if audio_stream.input_buffer_pos >= 1920:
+                    # Convert to int16 PCM
+                    pcm = (audio_stream.input_buffer[:1920] * 32767.0).astype(np.int16)
+                    
+                    # Encode with Opus
+                    if audio_stream.encoder:
+                        # Opus encoder expects bytes of int16 PCM data
+                        pcm_bytes = pcm.tobytes()
+                        opus_data = audio_stream.encoder.encode(pcm_bytes, 1920)
+                        
+                        if opus_data and len(opus_data) > 0:
+                            # Encrypt
+                            encrypted = crypto.encrypt_data(opus_data, bytes(audio_stream.key))
+                            if encrypted:
+                                # Base64 encode
+                                b64_data = crypto.encode_base64(encrypted)
+                                
+                                # Send via UDP
+                                if udp.global_udp_socket and udp.global_server_addr:
+                                    msg = f'{{"channel_id":"{audio_stream.channel_id}","type":"audio","data":"{b64_data}"}}'
+                                    try:
+                                        udp.global_udp_socket.sendto(
+                                            msg.encode('utf-8'),
+                                            udp.global_server_addr
+                                        )
+                                    except Exception as e:
+                                        pass  # Silently handle UDP errors
+                                
+                                del encrypted
+                    
+                    audio_stream.input_buffer_pos = 0
+        except Exception as e:
+            if not global_interrupted.is_set():
+                print(f"[AUDIO] Input error for {audio_stream.channel_id}: {e}")
+            time.sleep(0.1)
+    
+    print(f"[AUDIO] Input worker stopped for channel {audio_stream.channel_id}")
+
+def audio_output_worker(audio_stream: AudioStream):
+    """Audio output worker thread - plays audio from jitter buffer"""
+    from echostream import global_interrupted
+    
+    print(f"[AUDIO] Output worker started for channel {audio_stream.channel_id}")
+    
+    while not global_interrupted.is_set() and audio_stream.transmitting:
+        if audio_stream.output_stream is None:
+            time.sleep(0.1)
+            continue
+        
+        try:
+            # Get audio from jitter buffer
+            samples_to_play = None
+            with audio_stream.output_jitter.mutex:
+                if audio_stream.output_jitter.frame_count > 0:
+                    frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.read_index]
+                    if frame.valid:
+                        # Get samples from current frame
+                        remaining = frame.sample_count - audio_stream.current_output_frame_pos
+                        if remaining > 0:
+                            take = min(remaining, 1024)
+                            samples_to_play = frame.samples[
+                                audio_stream.current_output_frame_pos:
+                                audio_stream.current_output_frame_pos + take
+                            ].copy()
+                            audio_stream.current_output_frame_pos += take
+                            
+                            # Check if frame is done
+                            if audio_stream.current_output_frame_pos >= frame.sample_count:
+                                frame.valid = False
+                                audio_stream.output_jitter.read_index = (
+                                    audio_stream.output_jitter.read_index + 1
+                                ) % JITTER_BUFFER_SIZE
+                                audio_stream.output_jitter.frame_count -= 1
+                                audio_stream.current_output_frame_pos = 0
+            
+            # Play audio
+            if samples_to_play is not None and len(samples_to_play) > 0:
+                # Ensure samples are in correct format
+                samples_to_play = np.clip(samples_to_play, -1.0, 1.0)
+                audio_bytes = samples_to_play.astype(np.float32).tobytes()
+                audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
+            else:
+                # No audio available, play silence
+                silence = np.zeros(1024, dtype=np.float32)
+                audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
+                time.sleep(0.01)  # Small delay when no audio
+            
+        except Exception as e:
+            if not global_interrupted.is_set():
+                print(f"[AUDIO] Output error for {audio_stream.channel_id}: {e}")
+            time.sleep(0.1)
+    
+    print(f"[AUDIO] Output worker stopped for channel {audio_stream.channel_id}")
+
 def start_transmission_for_channel(audio_stream: AudioStream) -> bool:
     """Start audio transmission for a channel"""
     if pa_instance is None:
@@ -215,6 +335,7 @@ def start_transmission_for_channel(audio_stream: AudioStream) -> bool:
             frames_per_buffer=1024,
             stream_callback=None  # We'll use blocking I/O
         )
+        audio_stream.input_stream.start_stream()
         
         # Setup output stream
         try:
@@ -227,11 +348,29 @@ def start_transmission_for_channel(audio_stream: AudioStream) -> bool:
                 frames_per_buffer=1024,
                 stream_callback=None
             )
+            audio_stream.output_stream.start_stream()
         except Exception as e:
             print(f"Output stream failed, using input-only mode: {e}")
             audio_stream.output_stream = None
         
         audio_stream.transmitting = True
+        
+        # Start audio worker threads
+        input_thread = threading.Thread(
+            target=audio_input_worker,
+            args=(audio_stream,),
+            daemon=True
+        )
+        input_thread.start()
+        
+        if audio_stream.output_stream:
+            output_thread = threading.Thread(
+                target=audio_output_worker,
+                args=(audio_stream,),
+                daemon=True
+            )
+            output_thread.start()
+        
         print(f"Audio transmission started for channel {audio_stream.channel_id}")
         return True
     except Exception as e:
