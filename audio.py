@@ -266,15 +266,39 @@ def audio_input_worker(audio_stream: AudioStream):
                 channel_has_tone_detect = True
                 break
     
+    read_count = 0
+    skip_count = 0
+    
     while not global_interrupted.is_set() and audio_stream.transmitting:
-        if not audio_stream.gpio_active or audio_stream.input_stream is None:
+        if not audio_stream.gpio_active:
+            skip_count += 1
+            if skip_count % 100 == 0:  # Log every 10 seconds
+                print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: GPIO not active (gpio_active={audio_stream.gpio_active})")
+            time.sleep(0.1)
+            continue
+        
+        if audio_stream.input_stream is None:
+            skip_count += 1
+            if skip_count % 100 == 0:  # Log every 10 seconds
+                print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Input stream is None")
             time.sleep(0.1)
             continue
         
         try:
             # Read audio data
             data = audio_stream.input_stream.read(1024, exception_on_overflow=False)
+            if len(data) == 0:
+                skip_count += 1
+                if skip_count % 100 == 0:
+                    print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Read 0 bytes from input stream")
+                time.sleep(0.01)
+                continue
+            
+            read_count += 1
             audio_data = np.frombuffer(data, dtype=np.float32)
+            
+            if read_count % 1000 == 0:  # Log every ~10 seconds at 48kHz
+                print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Read {len(audio_data)} samples (read_count={read_count}, skip_count={skip_count})")
             
             # Update shared buffer for tone detection (if this channel has tone detection)
             if channel_has_tone_detect and tone_detect.is_tone_detect_enabled():
@@ -346,8 +370,14 @@ def audio_output_worker(audio_stream: AudioStream):
     
     is_passthrough_target = is_configured_passthrough_channel_id(audio_stream.channel_id)
     
+    output_count = 0
+    silence_count = 0
+    
     while not global_interrupted.is_set() and audio_stream.transmitting:
         if audio_stream.output_stream is None:
+            silence_count += 1
+            if silence_count % 100 == 0:  # Log every 10 seconds
+                print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Output stream is None")
             time.sleep(0.1)
             continue
         
@@ -405,10 +435,17 @@ def audio_output_worker(audio_stream: AudioStream):
                 samples_to_play = np.clip(samples_to_play, -1.0, 1.0)
                 audio_bytes = samples_to_play.astype(np.float32).tobytes()
                 audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
+                output_count += 1
+                if output_count % 1000 == 0:  # Log every ~10 seconds
+                    rms = np.sqrt(np.mean(samples_to_play**2))
+                    print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Playing audio (RMS={rms:.4f}, samples={len(samples_to_play)})")
             else:
                 # No audio available, play silence
                 silence = np.zeros(1024, dtype=np.float32)
                 audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
+                silence_count += 1
+                if silence_count % 1000 == 0:  # Log every ~10 seconds
+                    print(f"[AUDIO DEBUG] Channel {audio_stream.channel_id}: Playing silence (jitter_frames={audio_stream.output_jitter.frame_count}, passthrough_active={is_passthrough_target and tone_detect.global_tone_detection.passthrough_active})")
                 if not is_passthrough_target or not tone_detect.global_tone_detection.passthrough_active:
                     time.sleep(0.01)  # Small delay when no audio
             
@@ -497,6 +534,16 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
     """Process received audio data and add to jitter buffer"""
     if audio_stream.decoder is None:
         return
+    
+    # Debug: Track audio reception
+    static_receive_count = getattr(process_received_audio, '_receive_count', {})
+    if channel_id not in static_receive_count:
+        static_receive_count[channel_id] = 0
+    static_receive_count[channel_id] += 1
+    process_received_audio._receive_count = static_receive_count
+    
+    if static_receive_count[channel_id] % 1000 == 0:  # Log every 1000 packets
+        print(f"[AUDIO DEBUG] Channel {channel_id}: Received {static_receive_count[channel_id]} audio packets")
     
     try:
         # Decode Opus audio
