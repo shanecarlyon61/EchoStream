@@ -407,7 +407,22 @@ def audio_output_worker(audio_stream: AudioStream):
             # If not passthrough or no passthrough data, get from jitter buffer
             if samples_to_play is None:
                 with audio_stream.output_jitter.mutex:
-                    if audio_stream.output_jitter.frame_count > 0:
+                    jitter_frames = audio_stream.output_jitter.frame_count
+                    
+                    # Log jitter buffer underrun (when buffer becomes empty)
+                    if jitter_frames == 0:
+                        static_underrun_count = getattr(audio_output_worker, '_underrun_count', {})
+                        if audio_stream.channel_id not in static_underrun_count:
+                            static_underrun_count[audio_stream.channel_id] = 0
+                        static_underrun_count[audio_stream.channel_id] += 1
+                        audio_output_worker._underrun_count = static_underrun_count
+                        
+                        if static_underrun_count[audio_stream.channel_id] == 1:
+                            print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer empty! (read_idx={audio_stream.output_jitter.read_index}, write_idx={audio_stream.output_jitter.write_index})")
+                        elif static_underrun_count[audio_stream.channel_id] % 500 == 0:
+                            print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer still empty (underrun_count={static_underrun_count[audio_stream.channel_id]})")
+                    
+                    if jitter_frames > 0:
                         frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.read_index]
                         if frame.valid:
                             # Get samples from current frame
@@ -423,11 +438,35 @@ def audio_output_worker(audio_stream: AudioStream):
                                 # Check if frame is done
                                 if audio_stream.current_output_frame_pos >= frame.sample_count:
                                     frame.valid = False
+                                    old_read_idx = audio_stream.output_jitter.read_index
                                     audio_stream.output_jitter.read_index = (
                                         audio_stream.output_jitter.read_index + 1
                                     ) % JITTER_BUFFER_SIZE
                                     audio_stream.output_jitter.frame_count -= 1
                                     audio_stream.current_output_frame_pos = 0
+                                    
+                                    # Log frame consumption occasionally
+                                    if output_count % 500 == 0:
+                                        print(f"[JITTER READ] Channel {audio_stream.channel_id}: Consumed frame at idx {old_read_idx}, "
+                                              f"remaining_frames={audio_stream.output_jitter.frame_count}")
+                        else:
+                            # Frame marked invalid but still in buffer - this shouldn't happen
+                            static_invalid_count = getattr(audio_output_worker, '_invalid_frame_count', {})
+                            if audio_stream.channel_id not in static_invalid_count:
+                                static_invalid_count[audio_stream.channel_id] = 0
+                            static_invalid_count[audio_stream.channel_id] += 1
+                            audio_output_worker._invalid_frame_count = static_invalid_count
+                            
+                            if static_invalid_count[audio_stream.channel_id] % 100 == 0:
+                                print(f"[JITTER WARNING] Channel {audio_stream.channel_id}: Invalid frame at read_idx {audio_stream.output_jitter.read_index} "
+                                      f"(frame_count={jitter_frames}) - advancing read index")
+                            
+                            # Advance past invalid frame
+                            audio_stream.output_jitter.read_index = (
+                                audio_stream.output_jitter.read_index + 1
+                            ) % JITTER_BUFFER_SIZE
+                            audio_stream.output_jitter.frame_count -= 1
+                            audio_stream.current_output_frame_pos = 0
             
             # Play audio
             if samples_to_play is not None and len(samples_to_play) > 0:
@@ -562,6 +601,9 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
             
             # Add to jitter buffer
             with audio_stream.output_jitter.mutex:
+                buffer_before = audio_stream.output_jitter.frame_count
+                write_idx_before = audio_stream.output_jitter.write_index
+                
                 if audio_stream.output_jitter.frame_count < JITTER_BUFFER_SIZE:
                     frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.write_index]
                     frame.samples[:len(float_samples)] = float_samples
@@ -572,8 +614,15 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                         audio_stream.output_jitter.write_index + 1
                     ) % JITTER_BUFFER_SIZE
                     audio_stream.output_jitter.frame_count += 1
+                    
+                    # Log when buffer fills up initially
+                    if static_receive_count[channel_id] <= 5 or static_receive_count[channel_id] % 500 == 0:
+                        print(f"[JITTER WRITE] Channel {channel_id}: Added frame at idx {write_idx_before}, "
+                              f"frames={audio_stream.output_jitter.frame_count}/{JITTER_BUFFER_SIZE}, "
+                              f"read_idx={audio_stream.output_jitter.read_index}")
                 else:
                     # Buffer full, drop oldest
+                    old_read_idx = audio_stream.output_jitter.read_index
                     audio_stream.output_jitter.read_index = (
                         audio_stream.output_jitter.read_index + 1
                     ) % JITTER_BUFFER_SIZE
@@ -587,10 +636,20 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                     audio_stream.output_jitter.write_index = (
                         audio_stream.output_jitter.write_index + 1
                     ) % JITTER_BUFFER_SIZE
+                    
+                    # Log when buffer overflows (drops frames)
+                    if static_receive_count[channel_id] % 100 == 0:
+                        print(f"[JITTER OVERFLOW] Channel {channel_id}: Buffer full, dropped frame at idx {old_read_idx}, "
+                              f"frames={audio_stream.output_jitter.frame_count}/{JITTER_BUFFER_SIZE}")
+                
+                # Log buffer status when it transitions from empty to having data
+                if buffer_before == 0 and audio_stream.output_jitter.frame_count > 0:
+                    print(f"[JITTER RECOVERY] Channel {channel_id}: Buffer refilled! frames={audio_stream.output_jitter.frame_count}, "
+                          f"write_idx={audio_stream.output_jitter.write_index}, read_idx={audio_stream.output_jitter.read_index}")
                 
                 # Log jitter buffer status occasionally
                 if static_receive_count[channel_id] % 500 == 0:
-                    print(f"[AUDIO JITTER] Channel {channel_id}: jitter_frames={audio_stream.output_jitter.frame_count}/"
+                    print(f"[JITTER STATUS] Channel {channel_id}: frames={audio_stream.output_jitter.frame_count}/"
                           f"{JITTER_BUFFER_SIZE}, write_idx={audio_stream.output_jitter.write_index}, "
                           f"read_idx={audio_stream.output_jitter.read_index}")
     except Exception as e:
