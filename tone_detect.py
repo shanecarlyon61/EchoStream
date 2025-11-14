@@ -51,6 +51,16 @@ class ToneDetectionState:
         self.tone_b_start_time = 0
         self.active = False
         self.mutex = threading.Lock()
+        
+        # Tone sequence tracking
+        self.tone_a_confirmed = False
+        self.tone_b_confirmed = False
+        self.tone_a_tracking = False
+        self.tone_b_tracking = False
+        self.tone_a_tracking_start = 0
+        self.tone_b_tracking_start = 0
+        self.active_tone_def = None  # Currently active tone definition
+        self.passthrough_active = False
 
 global_tone_detection = ToneDetectionState()
 
@@ -115,8 +125,72 @@ def set_tone_config(threshold: float, gain: float, db_threshold: int,
     print(f"Tone config set: threshold={threshold}, gain={gain}, db={db_threshold}")
     return True
 
+def is_frequency_in_range(detected_freq: float, target_freq: float, range_hz: int) -> bool:
+    """Check if detected frequency is within range of target"""
+    return abs(detected_freq - target_freq) <= range_hz
+
+def check_tone_duration(is_tone_b: bool, current_time_ms: int, tone_def: ToneDefinition) -> bool:
+    """Check if tone has been present for required duration"""
+    if is_tone_b:
+        if not global_tone_detection.tone_b_tracking:
+            return False
+        elapsed = current_time_ms - global_tone_detection.tone_b_tracking_start
+        return elapsed >= tone_def.tone_b_length_ms
+    else:
+        if not global_tone_detection.tone_a_tracking:
+            return False
+        elapsed = current_time_ms - global_tone_detection.tone_a_tracking_start
+        return elapsed >= tone_def.tone_a_length_ms
+
+def reset_tone_tracking():
+    """Reset tone tracking state"""
+    with global_tone_detection.mutex:
+        global_tone_detection.tone_a_confirmed = False
+        global_tone_detection.tone_b_confirmed = False
+        global_tone_detection.tone_a_tracking = False
+        global_tone_detection.tone_b_tracking = False
+        global_tone_detection.tone_a_tracking_start = 0
+        global_tone_detection.tone_b_tracking_start = 0
+        global_tone_detection.active_tone_def = None
+
+def trigger_tone_passthrough(tone_def: ToneDefinition):
+    """Trigger passthrough routing when tone sequence is confirmed"""
+    import audio
+    import config
+    
+    # Find which channel has tone detection enabled
+    tone_config = None
+    source_channel_idx = -1
+    
+    for i in range(MAX_CHANNELS):
+        channel_config = config.get_channel_config(i)
+        if channel_config and channel_config.valid and channel_config.tone_detect:
+            tone_config = channel_config.tone_config
+            source_channel_idx = i
+            break
+    
+    if not tone_config or not tone_config.tone_passthrough:
+        print("[TONE PASSTHROUGH] Passthrough not enabled in config")
+        return
+    
+    print(f"[TONE PASSTHROUGH] Complete alert pair confirmed: Tone A={tone_def.tone_a_freq} Hz, Tone B={tone_def.tone_b_freq} Hz (ID: {tone_def.tone_id})")
+    print(f"[TONE PASSTHROUGH] Routing input audio to passthrough target: {tone_config.passthrough_channel}")
+    
+    # Enable passthrough mode
+    with global_tone_detection.mutex:
+        global_tone_detection.passthrough_active = True
+        global_tone_detection.active_tone_def = tone_def
+    
+    # Start recording timer for passthrough duration
+    if tone_def.record_length_ms > 0:
+        start_recording_timer(tone_def.record_length_ms)
+        print(f"[TONE PASSTHROUGH] Passthrough active for {tone_def.record_length_ms} ms")
+    
+    # Enable passthrough mode in audio module
+    audio.set_passthrough_output_mode(True)
+
 def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> bool:
-    """Process audio using Python approach (sliding window with FFT)"""
+    """Process audio using Python approach with full tone sequence detection"""
     if not global_tone_detection.active:
         return False
     
@@ -124,32 +198,137 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
     if sample_count < FFT_SIZE:
         return False
     
+    current_time_ms = int(time.time() * 1000)
+    
     # Take FFT
     fft_result = np.fft.rfft(samples[:FFT_SIZE])
     magnitudes = np.abs(fft_result)
     
-    # Find peak frequencies
-    peak_indices = signal.find_peaks(magnitudes, height=np.max(magnitudes) * 0.1)[0]
+    # Find peak frequencies (use higher threshold to reduce false positives)
+    peak_threshold = np.max(magnitudes) * 0.2
+    peak_indices = signal.find_peaks(magnitudes, height=peak_threshold)[0]
     
-    if len(peak_indices) > 0:
-        # Convert bin indices to frequencies
-        frequencies = peak_indices * SAMPLE_RATE / FFT_SIZE
+    if len(peak_indices) == 0:
+        # No peaks found, check for timeout
+        if global_tone_detection.tone_sequence_active:
+            time_since_tone_a = current_time_ms - global_tone_detection.tone_a_start_time
+            if time_since_tone_a > 5000:  # 5 second timeout
+                print("[TONE] Sequence reset due to timeout")
+                reset_tone_tracking()
+                with global_tone_detection.mutex:
+                    global_tone_detection.tone_sequence_active = False
+        return False
+    
+    # Convert bin indices to frequencies
+    frequencies = peak_indices * SAMPLE_RATE / FFT_SIZE
+    
+    # Constants for hit/miss tracking
+    HIT_REQUIRED = 3
+    MISS_REQUIRED = 5
+    GRACE_MS = 200
+    
+    # Check each tone definition
+    for tone_def in global_tone_detection.tone_definitions:
+        if not tone_def.valid:
+            continue
         
-        # Check against tone definitions
-        for tone_def in global_tone_detection.tone_definitions:
-            if not tone_def.valid:
+        # Check for Tone A first
+        if not global_tone_detection.tone_a_confirmed:
+            # Check if Tone B appears before Tone A is confirmed - invalid sequence
+            tone_b_detected = False
+            for freq in frequencies:
+                if is_frequency_in_range(freq, tone_def.tone_b_freq, tone_def.tone_b_range_hz):
+                    tone_b_detected = True
+                    break
+            
+            if tone_b_detected:
+                print(f"[TONE] INVALID SEQUENCE: Tone B ({tone_def.tone_b_freq} Hz) detected before Tone A confirmed - resetting")
+                reset_tone_tracking()
                 continue
             
+            # Check for Tone A
+            tone_a_detected = False
             for freq in frequencies:
-                # Check if frequency matches tone A or tone B
-                if abs(freq - tone_def.tone_a_freq) <= tone_def.tone_a_range_hz:
-                    print(f"[TONE DETECTED] Tone A detected: {freq} Hz (target: {tone_def.tone_a_freq} Hz)")
-                    return True
-                elif abs(freq - tone_def.tone_b_freq) <= tone_def.tone_b_range_hz:
-                    print(f"[TONE DETECTED] Tone B detected: {freq} Hz (target: {tone_def.tone_b_freq} Hz)")
-                    return True
+                if is_frequency_in_range(freq, tone_def.tone_a_freq, tone_def.tone_a_range_hz):
+                    tone_a_detected = True
+                    break
+            
+            if tone_a_detected:
+                # Start or continue tracking Tone A
+                if not global_tone_detection.tone_a_tracking:
+                    global_tone_detection.tone_a_tracking = True
+                    global_tone_detection.tone_a_tracking_start = current_time_ms
+                    print(f"[TONE] Tone A tracking started: {tone_def.tone_a_freq} Hz (ID: {tone_def.tone_id})")
+                else:
+                    # Check if duration requirement is met
+                    if check_tone_duration(False, current_time_ms, tone_def):
+                        with global_tone_detection.mutex:
+                            global_tone_detection.tone_a_confirmed = True
+                            global_tone_detection.current_tone_a_detected = True
+                            global_tone_detection.tone_a_start_time = current_time_ms
+                            global_tone_detection.tone_sequence_active = True
+                        print(f"[TONE CONFIRMED] Tone A confirmed! ({tone_def.tone_a_freq} Hz ±{tone_def.tone_a_range_hz} Hz, {tone_def.tone_a_length_ms} ms duration)")
+            else:
+                # Tone A lost - reset if grace period expired
+                if global_tone_detection.tone_a_tracking:
+                    elapsed = current_time_ms - global_tone_detection.tone_a_tracking_start
+                    if elapsed > GRACE_MS:
+                        print("[TONE] Tone A tracking reset - frequency lost")
+                        with global_tone_detection.mutex:
+                            global_tone_detection.tone_a_tracking = False
+                            global_tone_detection.tone_a_tracking_start = 0
+        
+        # Check for Tone B (only if Tone A is confirmed)
+        elif not global_tone_detection.tone_b_confirmed:
+            tone_b_detected = False
+            for freq in frequencies:
+                if is_frequency_in_range(freq, tone_def.tone_b_freq, tone_def.tone_b_range_hz):
+                    tone_b_detected = True
+                    break
+            
+            if tone_b_detected:
+                # Start or continue tracking Tone B
+                if not global_tone_detection.tone_b_tracking:
+                    global_tone_detection.tone_b_tracking = True
+                    global_tone_detection.tone_b_tracking_start = current_time_ms
+                    print(f"[TONE] Tone B tracking started: {tone_def.tone_b_freq} Hz (ID: {tone_def.tone_id})")
+                else:
+                    # Check if duration requirement is met
+                    if check_tone_duration(True, current_time_ms, tone_def):
+                        with global_tone_detection.mutex:
+                            global_tone_detection.tone_b_confirmed = True
+                            global_tone_detection.current_tone_b_detected = True
+                            global_tone_detection.tone_b_start_time = current_time_ms
+                        
+                        print(f"[TONE CONFIRMED] Tone B confirmed! ({tone_def.tone_b_freq} Hz ±{tone_def.tone_b_range_hz} Hz, {tone_def.tone_b_length_ms} ms duration)")
+                        print(f"[TONE ALERT] Complete alert pair confirmed: Tone A={tone_def.tone_a_freq} Hz, Tone B={tone_def.tone_b_freq} Hz")
+                        
+                        # Both tones confirmed - trigger passthrough
+                        trigger_tone_passthrough(tone_def)
+            else:
+                # Tone B lost - reset if grace period expired
+                if global_tone_detection.tone_b_tracking:
+                    elapsed = current_time_ms - global_tone_detection.tone_b_tracking_start
+                    if elapsed > GRACE_MS:
+                        print("[TONE] Tone B tracking reset - frequency lost")
+                        with global_tone_detection.mutex:
+                            global_tone_detection.tone_b_tracking = False
+                            global_tone_detection.tone_b_tracking_start = 0
     
-    return False
+    # Check if recording timer expired
+    if global_tone_detection.recording_active:
+        remaining = get_recording_time_remaining_ms()
+        if remaining <= 0:
+            # Recording timer expired - stop passthrough
+            print("[TONE PASSTHROUGH] Recording timer expired - stopping passthrough")
+            with global_tone_detection.mutex:
+                global_tone_detection.passthrough_active = False
+                global_tone_detection.recording_active = False
+            import audio
+            audio.set_passthrough_output_mode(False)
+            reset_tone_tracking()
+    
+    return global_tone_detection.passthrough_active
 
 def is_recording_active() -> bool:
     """Check if recording is active"""

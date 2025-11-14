@@ -199,12 +199,72 @@ def audio_output_callback(in_data, frame_count, time_info, status):
     output = np.zeros(frame_count, dtype=np.float32)
     return (output.tobytes(), pyaudio.paContinue)
 
+def get_passthrough_target_channel_index() -> int:
+    """Get the index of the passthrough target channel"""
+    import config
+    
+    # Find channel with tone detection enabled
+    for i in range(MAX_CHANNELS):
+        channel_config = config.get_channel_config(i)
+        if channel_config and channel_config.valid and channel_config.tone_detect:
+            tone_cfg = channel_config.tone_config
+            if tone_cfg.tone_passthrough:
+                # Map passthrough_channel string to channel index
+                passthrough_channel = tone_cfg.passthrough_channel
+                if passthrough_channel == "channel_four":
+                    return 2  # Last channel (index 2 for 3 channels)
+                elif passthrough_channel == "channel_three":
+                    return 2
+                elif passthrough_channel == "channel_two":
+                    return 1
+                elif passthrough_channel == "channel_one":
+                    return 0
+    return -1
+
+def is_configured_passthrough_channel_id(channel_id: str) -> bool:
+    """Check if channel_id matches the configured passthrough target"""
+    import config
+    from echostream import global_channel_ids, global_channel_count
+    
+    # Find channel with tone detection enabled
+    for i in range(MAX_CHANNELS):
+        channel_config = config.get_channel_config(i)
+        if channel_config and channel_config.valid and channel_config.tone_detect:
+            tone_cfg = channel_config.tone_config
+            if tone_cfg.tone_passthrough:
+                # Map passthrough_channel to index
+                passthrough_channel = tone_cfg.passthrough_channel
+                idx = -1
+                if passthrough_channel == "channel_four":
+                    idx = 2 if global_channel_count > 2 else -1
+                elif passthrough_channel == "channel_three":
+                    idx = 2 if global_channel_count > 2 else -1
+                elif passthrough_channel == "channel_two":
+                    idx = 1 if global_channel_count > 1 else -1
+                elif passthrough_channel == "channel_one":
+                    idx = 0
+                
+                if idx >= 0 and idx < global_channel_count:
+                    return channel_id == global_channel_ids[idx]
+    return False
+
 def audio_input_worker(audio_stream: AudioStream):
     """Audio input worker thread - captures audio and sends it"""
     from echostream import global_interrupted
     import udp
+    import tone_detect
+    import config
     
     print(f"[AUDIO] Input worker started for channel {audio_stream.channel_id}")
+    
+    # Check if this channel has tone detection enabled
+    channel_has_tone_detect = False
+    for i in range(MAX_CHANNELS):
+        channel_config = config.get_channel_config(i)
+        if channel_config and channel_config.valid and channel_config.tone_detect:
+            if channel_config.channel_id == audio_stream.channel_id:
+                channel_has_tone_detect = True
+                break
     
     while not global_interrupted.is_set() and audio_stream.transmitting:
         if not audio_stream.gpio_active or audio_stream.input_stream is None:
@@ -216,7 +276,16 @@ def audio_input_worker(audio_stream: AudioStream):
             data = audio_stream.input_stream.read(1024, exception_on_overflow=False)
             audio_data = np.frombuffer(data, dtype=np.float32)
             
-            # Accumulate samples
+            # Update shared buffer for tone detection (if this channel has tone detection)
+            if channel_has_tone_detect and tone_detect.is_tone_detect_enabled():
+                with global_shared_buffer.mutex:
+                    sample_count = min(len(audio_data), SAMPLES_PER_FRAME)
+                    global_shared_buffer.samples[:sample_count] = audio_data[:sample_count]
+                    global_shared_buffer.sample_count = sample_count
+                    global_shared_buffer.valid = True
+                    global_shared_buffer.data_ready.notify_all()
+            
+            # Accumulate samples for EchoStream transmission
             for sample in audio_data:
                 audio_stream.input_buffer[audio_stream.input_buffer_pos] = sample
                 audio_stream.input_buffer_pos += 1
@@ -260,10 +329,13 @@ def audio_input_worker(audio_stream: AudioStream):
     print(f"[AUDIO] Input worker stopped for channel {audio_stream.channel_id}")
 
 def audio_output_worker(audio_stream: AudioStream):
-    """Audio output worker thread - plays audio from jitter buffer"""
+    """Audio output worker thread - plays audio from jitter buffer or passthrough"""
     from echostream import global_interrupted
+    import tone_detect
     
     print(f"[AUDIO] Output worker started for channel {audio_stream.channel_id}")
+    
+    is_passthrough_target = is_configured_passthrough_channel_id(audio_stream.channel_id)
     
     while not global_interrupted.is_set() and audio_stream.transmitting:
         if audio_stream.output_stream is None:
@@ -271,30 +343,52 @@ def audio_output_worker(audio_stream: AudioStream):
             continue
         
         try:
-            # Get audio from jitter buffer
             samples_to_play = None
-            with audio_stream.output_jitter.mutex:
-                if audio_stream.output_jitter.frame_count > 0:
-                    frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.read_index]
-                    if frame.valid:
-                        # Get samples from current frame
-                        remaining = frame.sample_count - audio_stream.current_output_frame_pos
-                        if remaining > 0:
-                            take = min(remaining, 1024)
-                            samples_to_play = frame.samples[
-                                audio_stream.current_output_frame_pos:
-                                audio_stream.current_output_frame_pos + take
-                            ].copy()
-                            audio_stream.current_output_frame_pos += take
-                            
-                            # Check if frame is done
-                            if audio_stream.current_output_frame_pos >= frame.sample_count:
-                                frame.valid = False
-                                audio_stream.output_jitter.read_index = (
-                                    audio_stream.output_jitter.read_index + 1
-                                ) % JITTER_BUFFER_SIZE
-                                audio_stream.output_jitter.frame_count -= 1
-                                audio_stream.current_output_frame_pos = 0
+            
+            # Check if this is passthrough target and passthrough is active
+            if is_passthrough_target and tone_detect.global_tone_detection.passthrough_active:
+                # Read from shared buffer (input audio from source channel)
+                with global_shared_buffer.mutex:
+                    if global_shared_buffer.valid and global_shared_buffer.sample_count > 0:
+                        # Get samples from shared buffer
+                        take = min(1024, global_shared_buffer.sample_count)
+                        samples_to_play = global_shared_buffer.samples[:take].copy()
+                        # Shift remaining samples
+                        if global_shared_buffer.sample_count > take:
+                            remaining = global_shared_buffer.sample_count - take
+                            global_shared_buffer.samples[:remaining] = global_shared_buffer.samples[take:take+remaining]
+                            global_shared_buffer.sample_count = remaining
+                        else:
+                            global_shared_buffer.valid = False
+                            global_shared_buffer.sample_count = 0
+                    else:
+                        # No passthrough audio available - output silence
+                        samples_to_play = None
+            
+            # If not passthrough or no passthrough data, get from jitter buffer
+            if samples_to_play is None:
+                with audio_stream.output_jitter.mutex:
+                    if audio_stream.output_jitter.frame_count > 0:
+                        frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.read_index]
+                        if frame.valid:
+                            # Get samples from current frame
+                            remaining = frame.sample_count - audio_stream.current_output_frame_pos
+                            if remaining > 0:
+                                take = min(remaining, 1024)
+                                samples_to_play = frame.samples[
+                                    audio_stream.current_output_frame_pos:
+                                    audio_stream.current_output_frame_pos + take
+                                ].copy()
+                                audio_stream.current_output_frame_pos += take
+                                
+                                # Check if frame is done
+                                if audio_stream.current_output_frame_pos >= frame.sample_count:
+                                    frame.valid = False
+                                    audio_stream.output_jitter.read_index = (
+                                        audio_stream.output_jitter.read_index + 1
+                                    ) % JITTER_BUFFER_SIZE
+                                    audio_stream.output_jitter.frame_count -= 1
+                                    audio_stream.current_output_frame_pos = 0
             
             # Play audio
             if samples_to_play is not None and len(samples_to_play) > 0:
@@ -306,7 +400,8 @@ def audio_output_worker(audio_stream: AudioStream):
                 # No audio available, play silence
                 silence = np.zeros(1024, dtype=np.float32)
                 audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
-                time.sleep(0.01)  # Small delay when no audio
+                if not is_passthrough_target or not tone_detect.global_tone_detection.passthrough_active:
+                    time.sleep(0.01)  # Small delay when no audio
             
         except Exception as e:
             if not global_interrupted.is_set():

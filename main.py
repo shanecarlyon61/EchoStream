@@ -162,6 +162,41 @@ def main():
         print("Failed to start tone detection", file=sys.stderr)
         return 1
     
+    # Start tone detection worker thread
+    def tone_detection_worker():
+        """Worker thread that processes shared audio buffer for tone detection"""
+        import audio
+        import tone_detect
+        from echostream import global_interrupted
+        
+        print("[INFO] Tone detection thread started")
+        
+        while not global_interrupted.is_set():
+            try:
+                # Wait for data in shared buffer
+                with audio.global_shared_buffer.mutex:
+                    if not audio.global_shared_buffer.valid:
+                        audio.global_shared_buffer.data_ready.wait(timeout=0.1)
+                    
+                    if audio.global_shared_buffer.valid and audio.global_shared_buffer.sample_count > 0:
+                        # Process audio for tone detection
+                        samples = audio.global_shared_buffer.samples[:audio.global_shared_buffer.sample_count].copy()
+                        sample_count = audio.global_shared_buffer.sample_count
+                        
+                        # Process audio
+                        tone_detect.process_audio_python_approach(samples, sample_count)
+                
+                time.sleep(0.01)  # Small delay to avoid busy waiting
+            except Exception as e:
+                if not global_interrupted.is_set():
+                    print(f"[ERROR] Tone detection worker error: {e}")
+                time.sleep(0.1)
+        
+        print("[INFO] Tone detection thread stopped")
+    
+    tone_thread = threading.Thread(target=tone_detection_worker, daemon=True)
+    tone_thread.start()
+    
     # Start WebSocket thread
     ws_thread = threading.Thread(target=websocket.global_websocket_thread, daemon=True)
     ws_thread.start()
