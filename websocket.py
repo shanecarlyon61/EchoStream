@@ -167,18 +167,30 @@ async def websocket_handler():
                                         else:
                                             print(f"Key decode failed for channel {audio.channels[i].audio.channel_id}")
                     elif 'users_connected' in str(data):
-                        # Log users_connected message with full content
-                        print("=" * 60)
-                        print(f"[WEBSOCKET] Users Connected Message:")
-                        print(f"  Message: {message}")
-                        print(f"  Parsed Data: {json.dumps(data, indent=2)}")
-                        print("=" * 60)
+                        # Track users_connected messages to reduce spam
+                        if not hasattr(websocket_handler, '_users_connected_count'):
+                            websocket_handler._users_connected_count = 0
+                        websocket_handler._users_connected_count += 1
+                        count = websocket_handler._users_connected_count
+                        
+                        # Log full content first time only, then occasionally
+                        if count == 1:
+                            print("=" * 60)
+                            print(f"[WEBSOCKET] Users Connected Message (first occurrence):")
+                            print(f"  Message: {message}")
+                            print(f"  Parsed Data: {json.dumps(data, indent=2)}")
+                            print("=" * 60)
+                        elif count % 10 == 0:
+                            # Log every 10th message to avoid spam
+                            print(f"[WEBSOCKET] Users connected message #{count} received")
                         
                         # This is just an informational message - UDP may or may not be configured yet
                         if udp.global_udp_socket and udp.global_server_addr:
-                            print("[WEBSOCKET] Users connected - UDP is configured and ready")
+                            if count == 1:
+                                print("[WEBSOCKET] Users connected - UDP is configured and ready")
                         else:
-                            print("[WEBSOCKET] Users connected - UDP configuration pending")
+                            if count == 1:
+                                print("[WEBSOCKET] Users connected - UDP configuration pending")
                     else:
                         # Log other messages occasionally
                         if message_count % 50 == 0:
