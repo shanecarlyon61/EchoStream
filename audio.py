@@ -587,6 +587,12 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                     audio_stream.output_jitter.write_index = (
                         audio_stream.output_jitter.write_index + 1
                     ) % JITTER_BUFFER_SIZE
+                
+                # Log jitter buffer status occasionally
+                if static_receive_count[channel_id] % 500 == 0:
+                    print(f"[AUDIO JITTER] Channel {channel_id}: jitter_frames={audio_stream.output_jitter.frame_count}/"
+                          f"{JITTER_BUFFER_SIZE}, write_idx={audio_stream.output_jitter.write_index}, "
+                          f"read_idx={audio_stream.output_jitter.read_index}")
                     audio_stream.output_jitter.frame_count += 1
     except Exception as e:
         print(f"Error processing received audio: {e}")
