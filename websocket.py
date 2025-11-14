@@ -57,7 +57,11 @@ def send_websocket_transmit_event(channel_id: str, is_started: int):
             }
         }
         
-        print(f"[INFO] Sending {event_type} for channel {channel_id}")
+        # Only log occasionally to reduce spam
+        static_log_count = getattr(send_websocket_transmit_event, '_log_count', 0)
+        send_websocket_transmit_event._log_count = static_log_count + 1
+        if static_log_count % 100 == 0:  # Log every 100th call
+            print(f"[INFO] Sending {event_type} for channel {channel_id}")
         
         # Send via asyncio if we're in an async context
         if global_ws_context and global_ws_context.is_running():
@@ -67,7 +71,8 @@ def send_websocket_transmit_event(channel_id: str, is_started: int):
             )
         else:
             # Fallback: try to send synchronously (may not work)
-            print(f"[WARNING] Cannot send WebSocket message - no active event loop")
+            if static_log_count % 100 == 0:
+                print(f"[WARNING] Cannot send WebSocket message - no active event loop")
     except Exception as e:
         print(f"[ERROR] Failed to send WebSocket message for channel {channel_id}: {e}")
 

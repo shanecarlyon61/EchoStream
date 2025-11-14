@@ -153,41 +153,41 @@ def gpio_monitor_worker(arg=None):
                 gpio_38_state = curr_val_38
                 print(f"PIN 38: {'ACTIVE' if curr_val_38 == 0 else 'INACTIVE'}")
                 
-            # Find and set gpio_active flag for the correct audio stream
-            for i in range(4):
-                if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
-                    audio.channels[i].audio.gpio_active = 1 if curr_val_38 == 0 else 0
-                    print(f"Channel {global_channel_ids[0]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                    break
-            
-            import websocket
-            websocket.send_websocket_transmit_event(global_channel_ids[0], 1 if curr_val_38 == 0 else 0)
+                # Find and set gpio_active flag for the correct audio stream
+                for i in range(4):
+                    if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
+                        audio.channels[i].audio.gpio_active = 1 if curr_val_38 == 0 else 0
+                        print(f"Channel {global_channel_ids[0]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                        break
+                
+                import websocket
+                websocket.send_websocket_transmit_event(global_channel_ids[0], 1 if curr_val_38 == 0 else 0)
             
             if curr_val_40 != gpio_40_state and curr_val_40 != -1:
                 gpio_40_state = curr_val_40
                 print(f"PIN 40: {'ACTIVE' if curr_val_40 == 0 else 'INACTIVE'}")
                 
-            for i in range(4):
-                if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[1]:
-                    audio.channels[i].audio.gpio_active = 1 if curr_val_40 == 0 else 0
-                    print(f"Channel {global_channel_ids[1]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                    break
-            
-            import websocket
-            websocket.send_websocket_transmit_event(global_channel_ids[1], 1 if curr_val_40 == 0 else 0)
+                for i in range(4):
+                    if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[1]:
+                        audio.channels[i].audio.gpio_active = 1 if curr_val_40 == 0 else 0
+                        print(f"Channel {global_channel_ids[1]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                        break
+                
+                import websocket
+                websocket.send_websocket_transmit_event(global_channel_ids[1], 1 if curr_val_40 == 0 else 0)
             
             if curr_val_16 != gpio_16_state and curr_val_16 != -1:
                 gpio_16_state = curr_val_16
                 print(f"PIN 16: {'ACTIVE' if curr_val_16 == 0 else 'INACTIVE'}")
                 
-            for i in range(4):
-                if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[2]:
-                    audio.channels[i].audio.gpio_active = 1 if curr_val_16 == 0 else 0
-                    print(f"Channel {global_channel_ids[2]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                    break
-            
-            import websocket
-            websocket.send_websocket_transmit_event(global_channel_ids[2], 1 if curr_val_16 == 0 else 0)
+                for i in range(4):
+                    if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[2]:
+                        audio.channels[i].audio.gpio_active = 1 if curr_val_16 == 0 else 0
+                        print(f"Channel {global_channel_ids[2]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                        break
+                
+                import websocket
+                websocket.send_websocket_transmit_event(global_channel_ids[2], 1 if curr_val_16 == 0 else 0)
             
             if curr_val_18 != gpio_18_state and curr_val_18 != -1:
                 gpio_18_state = curr_val_18
