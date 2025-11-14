@@ -198,6 +198,16 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
     if sample_count < FFT_SIZE:
         return False
     
+    # Debug: Log when processing audio (occasionally)
+    static_process_count = getattr(process_audio_python_approach, '_process_count', 0)
+    process_audio_python_approach._process_count = static_process_count + 1
+    if static_process_count % 1000 == 0:  # Log every 1000th call (~every 10 seconds at 48kHz)
+        valid_tones = sum(1 for td in global_tone_detection.tone_definitions if td.valid)
+        if valid_tones == 0:
+            print("[TONE DEBUG] Processing audio but no tone definitions loaded!")
+        else:
+            print(f"[TONE DEBUG] Processing audio, {valid_tones} tone definition(s) loaded")
+    
     current_time_ms = int(time.time() * 1000)
     
     # Take FFT

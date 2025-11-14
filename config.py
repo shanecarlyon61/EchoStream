@@ -148,6 +148,37 @@ def load_complete_config() -> bool:
                         tone_config.new_tone_length_ms = int(alert_details.get('new_tone_length', 0))
                         tone_config.new_tone_range_hz = int(alert_details.get('new_tone_range', 0))
                     
+                    # Load tone definitions (alert_tones array)
+                    import tone_detect
+                    alert_tones = tone_detect_config_obj.get('alert_tones', [])
+                    tones_loaded = 0
+                    for tone_obj in alert_tones:
+                        tone_id = tone_obj.get('tone_id', '')
+                        tone_a = float(tone_obj.get('tone_a', 0.0))
+                        tone_b = float(tone_obj.get('tone_b', 0.0))
+                        # Convert seconds to milliseconds
+                        tone_a_length = int(float(tone_obj.get('tone_a_length', 0.0)) * 1000)
+                        tone_b_length = int(float(tone_obj.get('tone_b_length', 0.0)) * 1000)
+                        tone_a_range = int(tone_obj.get('tone_a_range', 0))
+                        tone_b_range = int(tone_obj.get('tone_b_range', 0))
+                        # Convert seconds to milliseconds
+                        record_length = int(tone_obj.get('record_length', 0)) * 1000
+                        detection_tone_alert = tone_obj.get('detection_tone_alert', '')
+                        
+                        if tone_id and tone_a > 0 and tone_b > 0:
+                            if tone_detect.add_tone_definition(
+                                tone_id, tone_a, tone_b,
+                                tone_a_length, tone_b_length,
+                                tone_a_range, tone_b_range,
+                                record_length,
+                                detection_tone_alert if detection_tone_alert else None
+                            ):
+                                tones_loaded += 1
+                                print(f"[CONFIG] Loaded tone: ID={tone_id}, A={tone_a} Hz±{tone_a_range} ({tone_a_length}ms), B={tone_b} Hz±{tone_b_range} ({tone_b_length}ms), rec={record_length}ms")
+                    
+                    if tones_loaded > 0:
+                        print(f"[CONFIG] Successfully loaded {tones_loaded} tone definition(s) for channel {i+1}")
+                    
                     tone_config.valid = True
                     
                     print(f"Loaded tone detection config for channel {i+1}: passthrough={tone_config.tone_passthrough}, channel={tone_config.passthrough_channel}")
