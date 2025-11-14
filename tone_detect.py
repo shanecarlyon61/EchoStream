@@ -10,7 +10,6 @@ from echostream import (
     SAMPLE_RATE, FREQ_BINS, SAMPLES_PER_FRAME
 )
 from scipy import signal
-from scipy.signal import hanning
 from numpy.fft import rfft
 import config
 import mqtt
@@ -154,7 +153,7 @@ def freq_from_fft(sig, fs=SAMPLE_RATE):
         return 0.0
     
     # Compute Fourier transform of windowed signal
-    windowed = sig * hanning(len(sig))
+    windowed = sig * np.hanning(len(sig))
     f = rfft(windowed)
     
     # Find the peak and interpolate to get a more accurate peak
