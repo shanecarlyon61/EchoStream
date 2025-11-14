@@ -229,7 +229,7 @@ def trigger_tone_passthrough(tone_def: ToneDefinition):
         return
     
     print("=" * 60)
-    print(f"[🔊 PASSTHROUGH START]")
+    print("[🔊 PASSTHROUGH START]")
     print(f"  Tone ID: {tone_def.tone_id}")
     print(f"  Source Channel: {source_channel_idx + 1}")
     print(f"  Target Channel: {tone_config.passthrough_channel}")
@@ -260,7 +260,6 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
     
     # Add samples to sliding window buffer
     with global_tone_detection.mutex:
-        initial_buffer_len = len(global_tone_detection.audio_buffer)
         global_tone_detection.audio_buffer.extend(samples[:sample_count])
         # Keep only last max_buffer_samples
         if len(global_tone_detection.audio_buffer) > global_tone_detection.max_buffer_samples:
@@ -338,10 +337,18 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
         # Convert to integer indices for array slicing
         start_idx = int((l_a + l_b) * SAMPLE_RATE)
         end_idx = int(l_b * SAMPLE_RATE)
-        tone_a_segment = buf_array[-start_idx:-end_idx]
+        
+        # Safety check: ensure indices are valid
+        if start_idx <= 0 or end_idx <= 0 or start_idx <= end_idx:
+            continue
+        if len(buf_array) < start_idx:
+            continue
+        
+        # Extract segments
+        tone_a_segment = buf_array[-start_idx:-end_idx] if end_idx > 0 else buf_array[-start_idx:]
         tone_b_segment = buf_array[-end_idx:]
         
-        if len(tone_a_segment) < SAMPLE_RATE * 0.1 or len(tone_b_segment) < SAMPLE_RATE * 0.1:
+        if len(tone_a_segment) < int(SAMPLE_RATE * 0.1) or len(tone_b_segment) < int(SAMPLE_RATE * 0.1):
             continue
         
         # Detect frequencies using parabolic interpolation (like ToneDetect)
@@ -375,9 +382,8 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
             max_tone_len_ms = max(tone_def.tone_a_length_ms, tone_def.tone_b_length_ms)
             
             if a_match and b_match and time_since_last > max_tone_len_ms:
-                detected = True
                 print("=" * 60)
-                print(f"[🎵 TONE SEQUENCE DETECTED! 🎵]")
+                print("[🎵 TONE SEQUENCE DETECTED! 🎵]")
                 print(f"  Tone ID: {tone_def.tone_id}")
                 print(f"  Tone A: {a_tone_freq:.1f} Hz (target: {tone_def.tone_a_freq} Hz ±{tone_def.tone_a_range_hz} Hz)")
                 print(f"  Tone B: {b_tone_freq:.1f} Hz (target: {tone_def.tone_b_freq} Hz ±{tone_def.tone_b_range_hz} Hz)")
@@ -408,9 +414,9 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
                 a_match = abs(tone_def.tone_a_freq - a_tone_freq) <= tolerance
                 b_match = abs(tone_def.tone_b_freq - b_tone_freq) <= tolerance
                 if a_match or b_match:
-                    any_match = True
                     status = "MATCH" if (a_match and b_match) else ("A_ONLY" if a_match else "B_ONLY")
-                    print(f"[TONE SCAN] A: {a_tone_freq:.1f}Hz, B: {b_tone_freq:.1f}Hz | Target: A={tone_def.tone_a_freq}Hz, B={tone_def.tone_b_freq}Hz | Status: {status}")
+                    print(f"[TONE SCAN] A: {a_tone_freq:.1f}Hz, B: {b_tone_freq:.1f}Hz | "
+                          f"Target: A={tone_def.tone_a_freq}Hz, B={tone_def.tone_b_freq}Hz | Status: {status}")
                     break
     
     # Check if recording timer expired
@@ -419,7 +425,7 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
         if remaining <= 0:
             # Recording timer expired - stop passthrough
             print("=" * 60)
-            print(f"[🔊 PASSTHROUGH STOP]")
+            print("[🔊 PASSTHROUGH STOP]")
             if global_tone_detection.active_tone_def:
                 print(f"  Tone ID: {global_tone_detection.active_tone_def.tone_id}")
                 print(f"  Duration completed: {global_tone_detection.active_tone_def.record_length_ms} ms")
