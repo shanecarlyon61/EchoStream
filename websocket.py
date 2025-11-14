@@ -151,14 +151,10 @@ async def websocket_handler():
                                             print(f"Key decode failed for channel {audio.channels[i].audio.channel_id}")
                     elif 'users_connected' in str(data):
                         # This is just an informational message - UDP may or may not be configured yet
-                        try:
-                            import udp
-                            if udp.global_udp_socket and udp.global_server_addr:
-                                print("Users connected message received (UDP is configured)")
-                            else:
-                                print("Users connected message received (UDP configuration pending)")
-                        except Exception:
-                            print("Users connected message received (UDP module not available)")
+                        if udp.global_udp_socket and udp.global_server_addr:
+                            print("Users connected message received (UDP is configured)")
+                        else:
+                            print("Users connected message received (UDP configuration pending)")
                 except json.JSONDecodeError:
                     print(f"Received non-JSON WebSocket message: {message[:100]}")
                 except Exception as e:
