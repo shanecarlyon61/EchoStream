@@ -106,6 +106,9 @@ def udp_listener_worker(arg=None):
     
     udp_debug_count = 0
     
+    packet_count = 0
+    timeout_count = 0
+    
     while not global_interrupted.is_set():
         try:
             # Set socket timeout to allow checking global_interrupted
@@ -113,9 +116,13 @@ def udp_listener_worker(arg=None):
             
             buffer, client_addr = global_udp_socket.recvfrom(8192)
             
-            udp_debug_count += 1
-            if udp_debug_count % 1000 == 0 and udp_debug_enabled():
-                print(f"UDP Listener: Still listening... (attempt {udp_debug_count})")
+            packet_count += 1
+            
+            # Log first few packets and then occasionally
+            if packet_count <= 5 or packet_count % 500 == 0:
+                print(f"[UDP RX] Received packet #{packet_count} from {client_addr} ({len(buffer)} bytes)")
+            
+            timeout_count = 0  # Reset timeout count on successful receive
             
             if buffer:
                 try:

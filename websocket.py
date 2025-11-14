@@ -123,9 +123,13 @@ async def websocket_handler():
                 
                 message_count += 1
                 
-                # Log all WebSocket messages (occasionally to avoid spam)
-                if message_count % 10 == 0 or len(str(message)) < 200:
-                    print(f"[WEBSOCKET] Received message #{message_count}: {message[:200]}")
+                # Log all WebSocket messages (show all short messages, occasionally for long ones)
+                if len(str(message)) < 200:
+                    # Show all short messages (like empty messages or small notifications)
+                    print(f"[WEBSOCKET] Message #{message_count}: {message}")
+                elif message_count % 50 == 0:
+                    # Log longer messages occasionally (every 50th message)
+                    print(f"[WEBSOCKET] Message #{message_count}: {message[:200]}...")
                 
                 try:
                     # Handle empty messages
