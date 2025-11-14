@@ -73,7 +73,14 @@ global_tone_detection = ToneDetectionState()
 def init_tone_detection() -> bool:
     """Initialize tone detection system"""
     global global_tone_detection
-    global_tone_detection = ToneDetectionState()
+    # Don't recreate if already initialized (tone definitions may have been loaded)
+    if global_tone_detection is None:
+        global_tone_detection = ToneDetectionState()
+    # Just ensure audio_buffer is initialized
+    if not hasattr(global_tone_detection, 'audio_buffer'):
+        global_tone_detection.audio_buffer = []
+        global_tone_detection.max_buffer_samples = int(SAMPLE_RATE * 10)
+        global_tone_detection.last_detect_time = 0
     print("[INFO] Tone detection system initialized")
     return True
 

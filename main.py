@@ -92,7 +92,14 @@ def main():
             global_channel_ids[i] = f"channel_{i + 1}"
         global_channel_count = 4
     
+    # Initialize tone detection system FIRST (before loading config)
+    # This creates the global_tone_detection object that config will populate
+    if not tone_detect.init_tone_detection():
+        print("Failed to initialize tone detection system", file=sys.stderr)
+        return 1
+    
     # Load complete configuration including tone detection settings
+    # This will add tone definitions to the already-initialized global_tone_detection
     print("[MAIN] Loading complete configuration from /home/will/.an/config.json...")
     if config.load_complete_config():
         print("[MAIN] Complete configuration loaded successfully")
@@ -113,11 +120,6 @@ def main():
     # Initialize tone detection control
     if not audio.init_tone_detect_control():
         print("Failed to initialize tone detection control", file=sys.stderr)
-        return 1
-    
-    # Initialize tone detection system
-    if not tone_detect.init_tone_detection():
-        print("Failed to initialize tone detection system", file=sys.stderr)
         return 1
     
     # Initialize shared audio buffer
