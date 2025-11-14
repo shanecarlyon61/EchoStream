@@ -330,6 +330,11 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
     
     return global_tone_detection.passthrough_active
 
+def is_tone_detect_enabled() -> bool:
+    """Check if tone detection is enabled"""
+    with global_tone_detection.mutex:
+        return global_tone_detection.active
+
 def is_recording_active() -> bool:
     """Check if recording is active"""
     with global_tone_detection.mutex:
