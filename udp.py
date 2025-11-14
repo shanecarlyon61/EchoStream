@@ -136,6 +136,16 @@ def udp_listener_worker(arg=None):
                         print(f"UDP Listener: Parsed - channel_id='{channel_id}', type='{msg_type}', data_length={len(data)}")
                     
                     if msg_type == 'audio':
+                        # Debug: Track audio messages
+                        static_audio_count = getattr(udp_listener_worker, '_audio_count', {})
+                        if channel_id not in static_audio_count:
+                            static_audio_count[channel_id] = 0
+                        static_audio_count[channel_id] += 1
+                        udp_listener_worker._audio_count = static_audio_count
+                        
+                        if static_audio_count[channel_id] % 1000 == 0:  # Log every 1000 packets
+                            print(f"[UDP DEBUG] Channel {channel_id}: Received {static_audio_count[channel_id]} audio messages")
+                        
                         # Find the channel
                         target_stream = None
                         target_index = -1
