@@ -1,0 +1,215 @@
+"""
+UDP communication - handles UDP socket setup, heartbeat, and audio packet reception
+"""
+import socket
+import threading
+import json
+import os
+import time
+from typing import Optional
+from echostream import global_interrupted, MAX_CHANNELS
+import audio
+import crypto
+
+# Global UDP state
+global_udp_socket: Optional[socket.socket] = None
+global_server_addr: Optional[tuple] = None
+heartbeat_thread: Optional[threading.Thread] = None
+udp_listener_thread: Optional[threading.Thread] = None
+
+# Statistics
+zero_key_warned = [False] * MAX_CHANNELS
+jitter_drop_count = [0] * MAX_CHANNELS
+decrypt_fail_count = [0] * MAX_CHANNELS
+
+def udp_debug_enabled() -> bool:
+    """Check if UDP debug is enabled via environment variable"""
+    env = os.getenv("UDP_DEBUG")
+    return env is not None and env != "0"
+
+def setup_global_udp(config: dict) -> bool:
+    """Setup global UDP socket"""
+    global global_udp_socket, global_server_addr, heartbeat_thread, udp_listener_thread
+    
+    if global_udp_socket is not None:
+        print(f"UDP socket already configured for {config['udp_host']}:{config['udp_port']}")
+        return True
+    
+    try:
+        global_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        global_server_addr = (config['udp_host'], config['udp_port'])
+        
+        print(f"Global UDP socket configured for {config['udp_host']}:{config['udp_port']}")
+        
+        # Send immediate heartbeat to establish connection
+        heartbeat_msg = b'{"type":"KEEP_ALIVE"}'
+        try:
+            global_udp_socket.sendto(heartbeat_msg, global_server_addr)
+            print("Initial heartbeat sent immediately upon UDP connection")
+        except Exception as e:
+            print(f"Initial heartbeat error: {e}")
+        
+        # Start heartbeat thread
+        if heartbeat_thread is None or not heartbeat_thread.is_alive():
+            heartbeat_thread = threading.Thread(target=heartbeat_worker, daemon=True)
+            heartbeat_thread.start()
+        
+        # Start UDP listener thread
+        if udp_listener_thread is None or not udp_listener_thread.is_alive():
+            udp_listener_thread = threading.Thread(target=udp_listener_worker, daemon=True)
+            udp_listener_thread.start()
+        
+        return True
+    except Exception as e:
+        print(f"UDP setup failed: {e}")
+        return False
+
+def heartbeat_worker(arg=None):
+    """Heartbeat worker thread - sends keep-alive messages"""
+    global global_udp_socket, global_server_addr
+    
+    print("Heartbeat worker started")
+    heartbeat_count = 0
+    
+    while not global_interrupted.is_set():
+        if global_udp_socket is not None and global_server_addr is not None:
+            heartbeat_msg = b'{"type":"KEEP_ALIVE"}'
+            try:
+                global_udp_socket.sendto(heartbeat_msg, global_server_addr)
+                heartbeat_count += 1
+                # Only log every 60th heartbeat (about every 10 minutes)
+                if heartbeat_count % 60 == 0:
+                    print(f"Heartbeat sent to keep NAT mapping active (count: {heartbeat_count})")
+            except Exception as e:
+                print(f"Heartbeat error: {e}")
+        
+        # Sleep for 10 seconds (100 iterations * 0.1s)
+        for _ in range(100):
+            if global_interrupted.is_set():
+                break
+            time.sleep(0.1)
+    
+    print("Heartbeat worker stopped")
+    return None
+
+def udp_listener_worker(arg=None):
+    """UDP listener worker thread - receives and processes audio packets"""
+    global global_udp_socket
+    
+    print("UDP listener worker started")
+    
+    if global_udp_socket is None:
+        print("UDP Listener: ERROR - Invalid socket")
+        return None
+    
+    print(f"Listening on UDP socket...")
+    
+    udp_debug_count = 0
+    
+    while not global_interrupted.is_set():
+        try:
+            # Set socket timeout to allow checking global_interrupted
+            global_udp_socket.settimeout(0.1)
+            
+            buffer, client_addr = global_udp_socket.recvfrom(8192)
+            
+            udp_debug_count += 1
+            if udp_debug_count % 1000 == 0 and udp_debug_enabled():
+                print(f"UDP Listener: Still listening... (attempt {udp_debug_count})")
+            
+            if buffer:
+                try:
+                    data_str = buffer.decode('utf-8')
+                    
+                    if udp_debug_enabled():
+                        print(f"UDP Listener: Received {len(buffer)} bytes from {client_addr}")
+                        print(f"UDP Listener: Raw data: {data_str[:200]}")
+                    
+                    # Parse JSON message
+                    json_data = json.loads(data_str)
+                    
+                    channel_id = json_data.get('channel_id', '')
+                    msg_type = json_data.get('type', '')
+                    data = json_data.get('data', '')
+                    
+                    if udp_debug_enabled():
+                        print(f"UDP Listener: Parsed - channel_id='{channel_id}', type='{msg_type}', data_length={len(data)}")
+                    
+                    if msg_type == 'audio':
+                        # Find the channel
+                        target_stream = None
+                        target_index = -1
+                        
+                        for i in range(MAX_CHANNELS):
+                            if audio.channels[i].active and audio.channels[i].audio.channel_id == channel_id:
+                                target_stream = audio.channels[i].audio
+                                target_index = i
+                                break
+                        
+                        if not target_stream:
+                            if udp_debug_enabled():
+                                print(f"UDP Listener: No active channel found for '{channel_id}'")
+                                active_channels = [audio.channels[i].audio.channel_id 
+                                                 for i in range(MAX_CHANNELS) if audio.channels[i].active]
+                                print(f"UDP Listener: Active channels: {active_channels}")
+                            continue
+                        
+                        # Decode base64 data
+                        encrypted_data = crypto.decode_base64(data)
+                        
+                        if len(encrypted_data) > 0:
+                            if udp_debug_enabled():
+                                print(f"UDP Listener: Base64 decoded successfully ({len(encrypted_data)} bytes)")
+                            
+                            # Check if key is zero
+                            key_is_zero = all(b == 0 for b in target_stream.key)
+                            
+                            if not key_is_zero:
+                                zero_key_warned[target_index] = False
+                            
+                            # Decrypt the data
+                            decrypted = crypto.decrypt_data(encrypted_data, bytes(target_stream.key))
+                            
+                            if decrypted:
+                                if udp_debug_enabled():
+                                    print(f"UDP Listener: Data decrypted successfully ({len(decrypted)} bytes)")
+                                
+                                # Decode Opus audio and add to jitter buffer
+                                audio.process_received_audio(target_stream, decrypted, channel_id, target_index)
+                            else:
+                                if key_is_zero and target_index >= 0:
+                                    if not zero_key_warned[target_index]:
+                                        print(f"UDP Listener: AES key not set for channel {channel_id}; dropping encrypted audio until key is provisioned")
+                                        zero_key_warned[target_index] = True
+                                else:
+                                    if target_index >= 0:
+                                        decrypt_fail_count[target_index] += 1
+                                        if udp_debug_enabled() or decrypt_fail_count[target_index] == 1 or decrypt_fail_count[target_index] % 50 == 0:
+                                            print(f"UDP Listener: Decryption failed for channel {channel_id}")
+                                    else:
+                                        print("UDP Listener: Decryption failed")
+                        else:
+                            if udp_debug_enabled():
+                                print("UDP Listener: Base64 decode failed")
+                    else:
+                        if udp_debug_enabled():
+                            print(f"UDP Listener: Non-audio message type '{msg_type}', ignoring")
+                            
+                except json.JSONDecodeError:
+                    if udp_debug_enabled():
+                        print("UDP Listener: Failed to parse JSON")
+                except Exception as e:
+                    if udp_debug_enabled():
+                        print(f"UDP Listener: Error processing message: {e}")
+        
+        except socket.timeout:
+            # Timeout is expected, continue loop
+            continue
+        except Exception as e:
+            if not global_interrupted.is_set():
+                print(f"UDP Listener: Receive error - {e}")
+            break
+    
+    print("UDP listener worker stopped")
+    return None
+
