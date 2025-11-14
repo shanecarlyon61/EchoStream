@@ -373,6 +373,12 @@ def audio_output_worker(audio_stream: AudioStream):
     output_count = 0
     silence_count = 0
     
+    # Minimum buffer threshold - wait until we have at least 2 frames before starting playback
+    # This prevents choppy audio from buffer underruns
+    MIN_BUFFER_THRESHOLD = 2
+    buffer_ready = False
+    buffer_wait_count = 0
+    
     while not global_interrupted.is_set() and audio_stream.transmitting:
         if audio_stream.output_stream is None:
             silence_count += 1
@@ -409,8 +415,20 @@ def audio_output_worker(audio_stream: AudioStream):
                 with audio_stream.output_jitter.mutex:
                     jitter_frames = audio_stream.output_jitter.frame_count
                     
-                    # Log jitter buffer underrun (when buffer becomes empty)
-                    if jitter_frames == 0:
+                    # Check if buffer is ready (has minimum threshold of frames)
+                    if jitter_frames >= MIN_BUFFER_THRESHOLD:
+                        buffer_ready = True
+                        if buffer_wait_count > 0:
+                            print(f"[JITTER READY] Channel {audio_stream.channel_id}: Buffer ready! frames={jitter_frames} (waited {buffer_wait_count} cycles)")
+                            buffer_wait_count = 0
+                    elif jitter_frames > 0:
+                        # Buffer has some frames but not enough - wait a bit
+                        buffer_wait_count += 1
+                        if buffer_wait_count % 100 == 0:
+                            print(f"[JITTER WAIT] Channel {audio_stream.channel_id}: Waiting for buffer to fill (frames={jitter_frames}/{MIN_BUFFER_THRESHOLD}, wait_count={buffer_wait_count})")
+                    else:
+                        # Buffer empty
+                        buffer_ready = False
                         static_underrun_count = getattr(audio_output_worker, '_underrun_count', {})
                         if audio_stream.channel_id not in static_underrun_count:
                             static_underrun_count[audio_stream.channel_id] = 0
@@ -422,7 +440,8 @@ def audio_output_worker(audio_stream: AudioStream):
                         elif static_underrun_count[audio_stream.channel_id] % 500 == 0:
                             print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer still empty (underrun_count={static_underrun_count[audio_stream.channel_id]})")
                     
-                    if jitter_frames > 0:
+                    # Only read from buffer if it's ready (has minimum threshold)
+                    if buffer_ready and jitter_frames > 0:
                         frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.read_index]
                         if frame.valid:
                             # Get samples from current frame
