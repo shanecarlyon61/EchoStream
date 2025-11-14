@@ -4,6 +4,7 @@ EchoStream Main - Main entry point for the EchoStream application
 import signal
 import sys
 import time
+import threading
 from echostream import global_interrupted, global_channel_ids, global_channel_count, MAX_CHANNELS, CHANNEL_ID_LEN
 import config
 import audio
