@@ -228,8 +228,14 @@ def trigger_tone_passthrough(tone_def: ToneDefinition):
         print("[TONE PASSTHROUGH] Passthrough not enabled in config")
         return
     
-    print(f"[TONE PASSTHROUGH] Complete alert pair confirmed: Tone A={tone_def.tone_a_freq} Hz, Tone B={tone_def.tone_b_freq} Hz (ID: {tone_def.tone_id})")
-    print(f"[TONE PASSTHROUGH] Routing input audio to passthrough target: {tone_config.passthrough_channel}")
+    print("=" * 60)
+    print(f"[🔊 PASSTHROUGH START]")
+    print(f"  Tone ID: {tone_def.tone_id}")
+    print(f"  Source Channel: {source_channel_idx + 1}")
+    print(f"  Target Channel: {tone_config.passthrough_channel}")
+    print(f"  Duration: {tone_def.record_length_ms} ms ({tone_def.record_length_ms / 1000:.1f} seconds)")
+    print(f"  Alert Type: {tone_def.detection_tone_alert if tone_def.detection_tone_alert else 'N/A'}")
+    print("=" * 60)
     
     # Enable passthrough mode
     with global_tone_detection.mutex:
@@ -239,10 +245,11 @@ def trigger_tone_passthrough(tone_def: ToneDefinition):
     # Start recording timer for passthrough duration
     if tone_def.record_length_ms > 0:
         start_recording_timer(tone_def.record_length_ms)
-        print(f"[TONE PASSTHROUGH] Passthrough active for {tone_def.record_length_ms} ms")
+        print(f"[PASSTHROUGH] Timer started: {tone_def.record_length_ms} ms")
     
     # Enable passthrough mode in audio module
     audio.set_passthrough_output_mode(True)
+    print(f"[PASSTHROUGH] Audio routing enabled to {tone_config.passthrough_channel}")
 
 def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> bool:
     """Process audio using sliding window approach (like ToneDetect project)"""
@@ -253,21 +260,31 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
     
     # Add samples to sliding window buffer
     with global_tone_detection.mutex:
+        initial_buffer_len = len(global_tone_detection.audio_buffer)
         global_tone_detection.audio_buffer.extend(samples[:sample_count])
         # Keep only last max_buffer_samples
         if len(global_tone_detection.audio_buffer) > global_tone_detection.max_buffer_samples:
             global_tone_detection.audio_buffer = global_tone_detection.audio_buffer[-global_tone_detection.max_buffer_samples:]
+        buffer_len = len(global_tone_detection.audio_buffer)
+    
+    # Log start of tone detection (first time only)
+    static_start_logged = getattr(process_audio_python_approach, '_start_logged', False)
+    if not static_start_logged:
+        valid_tones = sum(1 for td in global_tone_detection.tone_definitions if td.valid)
+        print(f"[TONE DETECTION START] Tone detection active: {global_tone_detection.active}")
+        print(f"[TONE DETECTION START] Loaded {valid_tones} tone definition(s)")
+        for i, td in enumerate(global_tone_detection.tone_definitions):
+            if td.valid:
+                print(f"[TONE DETECTION START] Tone {i+1}: ID={td.tone_id}, A={td.tone_a_freq}Hz±{td.tone_a_range_hz} ({td.tone_a_length_ms}ms), B={td.tone_b_freq}Hz±{td.tone_b_range_hz} ({td.tone_b_length_ms}ms)")
+        process_audio_python_approach._start_logged = True
     
     # Debug: Log when processing audio (occasionally)
     static_process_count = getattr(process_audio_python_approach, '_process_count', 0)
     process_audio_python_approach._process_count = static_process_count + 1
     if static_process_count % 1000 == 0:  # Log every 1000th call (~every 10 seconds at 48kHz)
         valid_tones = sum(1 for td in global_tone_detection.tone_definitions if td.valid)
-        buffer_len = len(global_tone_detection.audio_buffer)
-        if valid_tones == 0:
-            print(f"[TONE DEBUG] Processing audio but no tone definitions loaded! (buffer: {buffer_len} samples)")
-        else:
-            print(f"[TONE DEBUG] Processing audio, {valid_tones} tone definition(s) loaded (buffer: {buffer_len} samples)")
+        buffer_seconds = buffer_len / SAMPLE_RATE
+        print(f"[TONE DEBUG] Processing audio: {valid_tones} tone(s), buffer={buffer_seconds:.2f}s ({buffer_len} samples)")
     
     # Check volume threshold first (like ToneDetect)
     # Calculate RMS volume
@@ -359,8 +376,17 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
             
             if a_match and b_match and time_since_last > max_tone_len_ms:
                 detected = True
-                print(f"[TONE DETECTED] Tone pair detected! A: {a_tone_freq:.1f} Hz (target: {tone_def.tone_a_freq} Hz), "
-                      f"B: {b_tone_freq:.1f} Hz (target: {tone_def.tone_b_freq} Hz) - ID: {tone_def.tone_id}")
+                print("=" * 60)
+                print(f"[🎵 TONE SEQUENCE DETECTED! 🎵]")
+                print(f"  Tone ID: {tone_def.tone_id}")
+                print(f"  Tone A: {a_tone_freq:.1f} Hz (target: {tone_def.tone_a_freq} Hz ±{tone_def.tone_a_range_hz} Hz)")
+                print(f"  Tone B: {b_tone_freq:.1f} Hz (target: {tone_def.tone_b_freq} Hz ±{tone_def.tone_b_range_hz} Hz)")
+                print(f"  Tone A Length: {tone_def.tone_a_length_ms} ms")
+                print(f"  Tone B Length: {tone_def.tone_b_length_ms} ms")
+                print(f"  Record Length: {tone_def.record_length_ms} ms")
+                if tone_def.detection_tone_alert:
+                    print(f"  Alert Type: {tone_def.detection_tone_alert}")
+                print("=" * 60)
                 
                 global_tone_detection.last_detect_time = current_time_ms
                 
@@ -368,23 +394,44 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
                 trigger_tone_passthrough(tone_def)
                 break
         
-        # Debug: Log detected frequencies
-        if static_process_count % 100 == 0:
-            print(f"[TONE DEBUG] Freq: A: {a_tone_freq:.1f} Hz, B: {b_tone_freq:.1f} Hz, "
-                  f"length: {l_a:.1f}s & {l_b:.1f}s, vol: {volume_db:.1f} dB")
+        # Debug: Log detected frequencies (occasionally, with tone match status)
+        if static_process_count % 500 == 0:  # Log every ~5 seconds
+            # Check if any tone matches
+            any_match = False
+            for tone_def in global_tone_detection.tone_definitions:
+                if not tone_def.valid:
+                    continue
+                if abs(tone_def.tone_a_length_ms / 1000.0 - l_a) > 0.1 or \
+                   abs(tone_def.tone_b_length_ms / 1000.0 - l_b) > 0.1:
+                    continue
+                tolerance = max(tone_def.tone_a_range_hz, tone_def.tone_b_range_hz, 10)
+                a_match = abs(tone_def.tone_a_freq - a_tone_freq) <= tolerance
+                b_match = abs(tone_def.tone_b_freq - b_tone_freq) <= tolerance
+                if a_match or b_match:
+                    any_match = True
+                    status = "MATCH" if (a_match and b_match) else ("A_ONLY" if a_match else "B_ONLY")
+                    print(f"[TONE SCAN] A: {a_tone_freq:.1f}Hz, B: {b_tone_freq:.1f}Hz | Target: A={tone_def.tone_a_freq}Hz, B={tone_def.tone_b_freq}Hz | Status: {status}")
+                    break
     
     # Check if recording timer expired
     if global_tone_detection.recording_active:
         remaining = get_recording_time_remaining_ms()
         if remaining <= 0:
             # Recording timer expired - stop passthrough
-            print("[TONE PASSTHROUGH] Recording timer expired - stopping passthrough")
+            print("=" * 60)
+            print(f"[🔊 PASSTHROUGH STOP]")
+            if global_tone_detection.active_tone_def:
+                print(f"  Tone ID: {global_tone_detection.active_tone_def.tone_id}")
+                print(f"  Duration completed: {global_tone_detection.active_tone_def.record_length_ms} ms")
+            print("=" * 60)
             with global_tone_detection.mutex:
                 global_tone_detection.passthrough_active = False
                 global_tone_detection.recording_active = False
+                global_tone_detection.active_tone_def = None
             import audio
             audio.set_passthrough_output_mode(False)
             reset_tone_tracking()
+            print("[PASSTHROUGH] Audio routing disabled")
     
     return global_tone_detection.passthrough_active
 
