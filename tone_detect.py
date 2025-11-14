@@ -318,8 +318,11 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
         
         # Extract tone A and tone B segments (like ToneDetect)
         buf_array = np.array(global_tone_detection.audio_buffer)
-        tone_a_segment = buf_array[-(l_a + l_b) * SAMPLE_RATE:-int(l_b * SAMPLE_RATE)]
-        tone_b_segment = buf_array[-int(l_b * SAMPLE_RATE):]
+        # Convert to integer indices for array slicing
+        start_idx = int((l_a + l_b) * SAMPLE_RATE)
+        end_idx = int(l_b * SAMPLE_RATE)
+        tone_a_segment = buf_array[-start_idx:-end_idx]
+        tone_b_segment = buf_array[-end_idx:]
         
         if len(tone_a_segment) < SAMPLE_RATE * 0.1 or len(tone_b_segment) < SAMPLE_RATE * 0.1:
             continue
