@@ -121,10 +121,6 @@ def udp_listener_worker(arg=None):
                 try:
                     data_str = buffer.decode('utf-8')
                     
-                    if udp_debug_enabled():
-                        print(f"UDP Listener: Received {len(buffer)} bytes from {client_addr}")
-                        print(f"UDP Listener: Raw data: {data_str[:200]}")
-                    
                     # Parse JSON message
                     json_data = json.loads(data_str)
                     
@@ -132,20 +128,24 @@ def udp_listener_worker(arg=None):
                     msg_type = json_data.get('type', '')
                     data = json_data.get('data', '')
                     
-                    if udp_debug_enabled():
-                        print(f"UDP Listener: Parsed - channel_id='{channel_id}', type='{msg_type}', data_length={len(data)}")
-                    
+                    # Log audio messages occasionally
                     if msg_type == 'audio':
-                        # Debug: Track audio messages
                         static_audio_count = getattr(udp_listener_worker, '_audio_count', {})
                         if channel_id not in static_audio_count:
                             static_audio_count[channel_id] = 0
                         static_audio_count[channel_id] += 1
                         udp_listener_worker._audio_count = static_audio_count
                         
-                        if static_audio_count[channel_id] % 1000 == 0:  # Log every 1000 packets
-                            print(f"[UDP DEBUG] Channel {channel_id}: Received {static_audio_count[channel_id]} audio messages")
-                        
+                        # Log first few audio messages and then occasionally
+                        if static_audio_count[channel_id] <= 5 or static_audio_count[channel_id] % 500 == 0:
+                            print(f"[UDP AUDIO] Channel {channel_id}: Received audio packet #{static_audio_count[channel_id]} "
+                                  f"({len(buffer)} bytes, data_length={len(data)})")
+                    
+                    # Log non-audio messages
+                    elif msg_type:
+                        print(f"[UDP] Received {msg_type} message: channel_id={channel_id}, data_length={len(data)}")
+                    
+                    if msg_type == 'audio':
                         # Find the channel
                         target_stream = None
                         target_index = -1

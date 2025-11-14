@@ -116,16 +116,33 @@ async def websocket_handler():
             print("[INFO] Waiting for UDP connection info from WebSocket")
             
             # Listen for messages
+            message_count = 0
             async for message in ws:
                 if global_interrupted.is_set():
                     break
                 
+                message_count += 1
+                
+                # Log all WebSocket messages (occasionally to avoid spam)
+                if message_count % 10 == 0 or len(str(message)) < 200:
+                    print(f"[WEBSOCKET] Received message #{message_count}: {message[:200]}")
+                
                 try:
+                    # Handle empty messages
+                    if not message or len(message) == 0:
+                        if message_count % 100 == 0:  # Log occasionally
+                            print(f"[WEBSOCKET] Received empty message (#{message_count})")
+                        continue
+                    
                     data = json.loads(message)
                     
-                    # Check if this is the UDP connection info message
+                    # Log full message content for important messages
                     if 'udp_host' in str(data) and 'udp_port' in str(data) and 'websocket_id' in str(data):
-                        print(f"Received UDP connection info: {message}")
+                        print("=" * 60)
+                        print(f"[WEBSOCKET] UDP Connection Info Received:")
+                        print(f"  Message: {message}")
+                        print(f"  Parsed Data: {json.dumps(data, indent=2)}")
+                        print("=" * 60)
                         
                         # Parse the WebSocket configuration
                         if parse_websocket_config(message, global_config):
@@ -150,15 +167,29 @@ async def websocket_handler():
                                         else:
                                             print(f"Key decode failed for channel {audio.channels[i].audio.channel_id}")
                     elif 'users_connected' in str(data):
+                        # Log users_connected message with full content
+                        print("=" * 60)
+                        print(f"[WEBSOCKET] Users Connected Message:")
+                        print(f"  Message: {message}")
+                        print(f"  Parsed Data: {json.dumps(data, indent=2)}")
+                        print("=" * 60)
+                        
                         # This is just an informational message - UDP may or may not be configured yet
                         if udp.global_udp_socket and udp.global_server_addr:
-                            print("Users connected message received (UDP is configured)")
+                            print("[WEBSOCKET] Users connected - UDP is configured and ready")
                         else:
-                            print("Users connected message received (UDP configuration pending)")
-                except json.JSONDecodeError:
-                    print(f"Received non-JSON WebSocket message: {message[:100]}")
+                            print("[WEBSOCKET] Users connected - UDP configuration pending")
+                    else:
+                        # Log other messages occasionally
+                        if message_count % 50 == 0:
+                            print(f"[WEBSOCKET] Other message (#{message_count}): {json.dumps(data, indent=2)[:300]}")
+                            
+                except json.JSONDecodeError as e:
+                    print(f"[WEBSOCKET] JSON decode error: {e}")
+                    print(f"[WEBSOCKET] Message content: {message[:200]}")
                 except Exception as e:
-                    print(f"Error processing WebSocket message: {e}")
+                    print(f"[WEBSOCKET] Error processing message: {e}")
+                    print(f"[WEBSOCKET] Message: {message[:200]}")
     
     except Exception as e:
         print(f"[ERROR] WebSocket connection error: {e}")

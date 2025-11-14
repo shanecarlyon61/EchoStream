@@ -542,8 +542,10 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
     static_receive_count[channel_id] += 1
     process_received_audio._receive_count = static_receive_count
     
-    if static_receive_count[channel_id] % 1000 == 0:  # Log every 1000 packets
-        print(f"[AUDIO DEBUG] Channel {channel_id}: Received {static_receive_count[channel_id]} audio packets")
+    # Log first few packets and then occasionally
+    if static_receive_count[channel_id] <= 5 or static_receive_count[channel_id] % 500 == 0:
+        print(f"[AUDIO RX] Channel {channel_id}: Received audio packet #{static_receive_count[channel_id]} "
+              f"({len(opus_data)} bytes)")
     
     try:
         # Decode Opus audio
