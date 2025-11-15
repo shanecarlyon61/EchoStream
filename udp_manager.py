@@ -30,7 +30,6 @@ def setup_udp(host: str, port: int, bind_port: int = 0) -> bool:
         print(f"[UDP] Server address: {global_server_addr}")
         
         send_heartbeat()
-        print("[UDP] Initial heartbeat sent")
         
         try:
             local_addr = global_udp_socket.getsockname()
@@ -264,10 +263,6 @@ def udp_listener_worker():
             continue
         
         try:
-            # if first_recv_attempt:
-            #     print(f"[UDP] Blocking on recvfrom() - waiting for packets...")
-            #     first_recv_attempt = False
-            
             result = receive_audio_packet()
             
             if result:
