@@ -141,8 +141,6 @@ def udp_listener_worker(arg=None):
             # Match C implementation: Use blocking recvfrom() with no timeout
             # C uses blocking recvfrom() which waits indefinitely for packets
             # Use select() to make it truly blocking while still checking global_interrupted
-            import select
-            
             # Use select() to wait for data with a timeout, allowing interrupt checking
             # This matches C's blocking behavior more closely than settimeout()
             ready, _, _ = select.select([global_udp_socket], [], [], 1.0)  # 1s timeout for interrupt checking
