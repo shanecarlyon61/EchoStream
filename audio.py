@@ -478,15 +478,23 @@ def audio_output_worker(audio_stream: AudioStream):
                     
                     # Match C implementation: Always fill buffer, even if jitter buffer is empty (with silence)
                     # However, if buffer is empty and we've never had frames, wait briefly for initial packets
-                    # This prevents choppy audio at startup
+                    # This prevents choppy audio at startup by ensuring we have some data before starting playback
+                    # At 48kHz, we need ~50 packets/second (one every 20ms) - wait for at least 2-3 frames before starting
+                    MIN_STARTUP_FRAMES = 2  # Wait for at least 2 frames (40ms) before starting playback
                     if jitter_frames == 0:
                         # Buffer empty
                         if not audio_output_worker._has_had_frames.get(audio_stream.channel_id, False):
                             # Never had frames - wait briefly for initial packets to arrive
                             # Release lock and wait before trying again
                             # This prevents busy-waiting and allows UDP packets to arrive
-                            time.sleep(0.01)  # Wait 10ms for packets to arrive
+                            # Wait longer initially to allow multiple packets to arrive
+                            time.sleep(0.05)  # Wait 50ms for initial packets (allows 2-3 packets at 20ms intervals)
                             continue  # Skip this iteration, try again next loop
+                    elif jitter_frames < MIN_STARTUP_FRAMES and not audio_output_worker._has_had_frames.get(audio_stream.channel_id, False):
+                        # Buffer has some frames but not enough for smooth startup
+                        # Wait a bit more to allow buffer to fill to minimum threshold
+                        time.sleep(0.02)  # Wait 20ms for more packets
+                        continue  # Skip this iteration, try again next loop
                         else:
                             # Buffer was full but now empty - underrun condition
                             # Match C: fill with silence but log the underrun
