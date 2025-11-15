@@ -138,6 +138,12 @@ def udp_listener_worker(arg=None):
             packet_count += 1
             last_packet_time = time.time()
             
+            # Log when we receive packets after timeouts (important for diagnosing)
+            # Check BEFORE resetting timeout_count
+            if timeout_count > 0:
+                print(f"[UDP RX] Packet received after {timeout_count} timeouts! Packet #{packet_count} from {client_addr} "
+                      f"(was waiting {timeout_count*0.1:.1f}s)")
+            
             # Reset timeout count on successful receive
             timeout_count = 0
             
@@ -146,10 +152,6 @@ def udp_listener_worker(arg=None):
                 print(f"[UDP RX] Received packet #{packet_count} from {client_addr} ({len(buffer)} bytes)")
             elif packet_count % 500 == 0:
                 print(f"[UDP RX] Received packet #{packet_count} from {client_addr} ({len(buffer)} bytes)")
-            
-            # Log when we receive packets after timeouts (important for diagnosing)
-            if timeout_count > 0:
-                print(f"[UDP RX] Packet received after {timeout_count} timeouts! Packet #{packet_count} from {client_addr}")
             
             if buffer:
                 try:
