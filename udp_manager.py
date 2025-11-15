@@ -1,6 +1,3 @@
-"""
-UDP Manager - UDP audio packet transmission and reception
-"""
 import socket
 import threading
 import time
