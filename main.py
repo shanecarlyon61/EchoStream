@@ -29,9 +29,13 @@ import audio_workers
 
 def handle_shutdown(sig, frame):
     """Handle shutdown signal (SIGINT, SIGTERM)."""
+    if global_interrupted.is_set():
+        print("\n[MAIN] Force exit...")
+        import os
+        os._exit(1)
+    
     print("\n[MAIN] Shutdown signal received, cleaning up...")
     global_interrupted.set()
-    
     cleanup_all()
 
 

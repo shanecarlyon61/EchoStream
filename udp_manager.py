@@ -51,15 +51,16 @@ def cleanup_udp():
     
     heartbeat_enabled = False
     
-    if global_udp_socket is not None:
+    socket_to_close = global_udp_socket
+    global_udp_socket = None
+    global_server_addr = None
+    
+    if socket_to_close is not None:
         try:
-            global_udp_socket.close()
+            socket_to_close.close()
             print("[UDP] UDP socket closed")
         except Exception as e:
             print(f"[UDP] ERROR: Exception closing UDP socket: {e}")
-        finally:
-            global_udp_socket = None
-            global_server_addr = None
 
 def get_server_address() -> Optional[Tuple[str, int]]:
     return global_server_addr
@@ -106,11 +107,12 @@ def decrypt_packet(encrypted_data: bytes, key: bytes) -> Optional[bytes]:
 def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
     global global_udp_socket
     
-    if global_udp_socket is None:
+    socket_to_use = global_udp_socket
+    if socket_to_use is None:
         return None
     
     try:
-        data, addr = global_udp_socket.recvfrom(8192)
+        data, addr = socket_to_use.recvfrom(8192)
         
         if not hasattr(receive_audio_packet, '_first_receive_logged'):
             print(f"[UDP] ✅ Socket receiving data! Got {len(data)} bytes from {addr[0]}:{addr[1]}")
@@ -118,6 +120,10 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
         
         if len(data) == 0:
             return None
+    except OSError as e:
+        if e.errno == 9 or e.errno == 107:
+            return None
+        raise
         
         try:
             message = json.loads(data.decode('utf-8'))
@@ -153,25 +159,30 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
         
     except socket.timeout:
         return None
-    except socket.error as e:
-        if hasattr(e, 'errno') and e.errno in (11, 10035):
+    except (socket.error, OSError) as e:
+        errno = getattr(e, 'errno', None)
+        if errno in (9, 107, 10035):
             return None
-        if not global_interrupted.is_set():
-            static_errors = getattr(receive_audio_packet, '_socket_errors', 0)
-            receive_audio_packet._socket_errors = static_errors + 1
-            if static_errors < 3:
-                print(f"[UDP] ERROR: Socket error receiving packet (error #{static_errors + 1}): {e}")
-                import traceback
-                traceback.print_exc()
+        if errno == 11:
+            return None
+        if global_interrupted.is_set():
+            return None
+        static_errors = getattr(receive_audio_packet, '_socket_errors', 0)
+        receive_audio_packet._socket_errors = static_errors + 1
+        if static_errors < 3:
+            print(f"[UDP] ERROR: Socket error receiving packet (error #{static_errors + 1}): {e}")
+            import traceback
+            traceback.print_exc()
         return None
     except Exception as e:
-        if not global_interrupted.is_set():
-            static_errors = getattr(receive_audio_packet, '_general_errors', 0)
-            receive_audio_packet._general_errors = static_errors + 1
-            if static_errors < 3:
-                print(f"[UDP] ERROR: Exception receiving packet (error #{static_errors + 1}): {e}")
-                import traceback
-                traceback.print_exc()
+        if global_interrupted.is_set():
+            return None
+        static_errors = getattr(receive_audio_packet, '_general_errors', 0)
+        receive_audio_packet._general_errors = static_errors + 1
+        if static_errors < 3:
+            print(f"[UDP] ERROR: Exception receiving packet (error #{static_errors + 1}): {e}")
+            import traceback
+            traceback.print_exc()
         return None
 
 def set_packet_receive_callback(callback: Callable[[str, bytes], None]):
