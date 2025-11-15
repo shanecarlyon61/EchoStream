@@ -138,12 +138,17 @@ def gpio_monitor_worker(arg=None):
     
     # Re-sync GPIO state now that channels should be active
     print("[GPIO] Re-syncing GPIO state with channels...")
+    # Import websocket here to avoid circular import at module level
+    import websocket
+    
     if gpio_38_state == 0:
         for i in range(4):
             if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
                 if not audio.channels[i].audio.gpio_active:
                     audio.channels[i].audio.gpio_active = 1
                     print(f"[GPIO] Channel {global_channel_ids[0]} audio ENABLED (re-sync: PIN 38 is active)")
+                    # Send transmit_started to server - server only sends audio when client is transmitting
+                    websocket.send_websocket_transmit_event(global_channel_ids[0], 1)
                 break
     
     if gpio_40_state == 0:
@@ -152,6 +157,8 @@ def gpio_monitor_worker(arg=None):
                 if not audio.channels[i].audio.gpio_active:
                     audio.channels[i].audio.gpio_active = 1
                     print(f"[GPIO] Channel {global_channel_ids[1]} audio ENABLED (re-sync: PIN 40 is active)")
+                    # Send transmit_started to server
+                    websocket.send_websocket_transmit_event(global_channel_ids[1], 1)
                 break
     
     if gpio_16_state == 0:
@@ -160,6 +167,8 @@ def gpio_monitor_worker(arg=None):
                 if not audio.channels[i].audio.gpio_active:
                     audio.channels[i].audio.gpio_active = 1
                     print(f"[GPIO] Channel {global_channel_ids[2]} audio ENABLED (re-sync: PIN 16 is active)")
+                    # Send transmit_started to server
+                    websocket.send_websocket_transmit_event(global_channel_ids[2], 1)
                 break
     
     if gpio_18_state == 0 and global_channel_count > 3:
@@ -168,6 +177,8 @@ def gpio_monitor_worker(arg=None):
                 if not audio.channels[i].audio.gpio_active:
                     audio.channels[i].audio.gpio_active = 1
                     print(f"[GPIO] Channel {global_channel_ids[3]} audio ENABLED (re-sync: PIN 18 is active)")
+                    # Send transmit_started to server
+                    websocket.send_websocket_transmit_event(global_channel_ids[3], 1)
                 break
     
     status_counter = 0

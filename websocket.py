@@ -57,11 +57,9 @@ def send_websocket_transmit_event(channel_id: str, is_started: int):
             }
         }
         
-        # Only log occasionally to reduce spam
-        static_log_count = getattr(send_websocket_transmit_event, '_log_count', 0)
-        send_websocket_transmit_event._log_count = static_log_count + 1
-        if static_log_count % 100 == 0:  # Log every 100th call
-            print(f"[INFO] Sending {event_type} for channel {channel_id}")
+        # Always log transmit events - they're important for understanding server behavior
+        # The server only sends audio when client is transmitting (transmit_started)
+        print(f"[WEBSOCKET TX] Sending {event_type} for channel {channel_id} (PTT {'PRESSED' if is_started else 'RELEASED'})")
         
         # Send via asyncio if we're in an async context
         if global_ws_context and global_ws_context.is_running():
@@ -103,7 +101,7 @@ async def websocket_handler():
                         "connect": {
                             "affiliation_id": "12345",
                             "user_name": "EchoStream",
-                            "agency_name": "TestAgency",
+                            "agency_name": "Python",
                             "channel_id": audio.channels[i].audio.channel_id,
                             "time": now
                         }
