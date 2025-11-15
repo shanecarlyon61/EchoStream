@@ -264,9 +264,9 @@ def udp_listener_worker():
             continue
         
         try:
-            if first_recv_attempt:
-                print(f"[UDP] Blocking on recvfrom() - waiting for packets...")
-                first_recv_attempt = False
+            # if first_recv_attempt:
+            #     print(f"[UDP] Blocking on recvfrom() - waiting for packets...")
+            #     first_recv_attempt = False
             
             result = receive_audio_packet()
             
