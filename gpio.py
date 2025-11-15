@@ -131,6 +131,45 @@ def gpio_monitor_worker(arg=None):
     print("Monitoring GPIO pins for changes...")
     print("GPIO Status will be displayed every 10 seconds")
     
+    # Re-sync GPIO state after channels are set up (in case channels weren't active during initial check)
+    # Wait a bit for channels to be set up, then re-check
+    import time
+    time.sleep(2)  # Give channels time to be set up
+    
+    # Re-sync GPIO state now that channels should be active
+    print("[GPIO] Re-syncing GPIO state with channels...")
+    if gpio_38_state == 0:
+        for i in range(4):
+            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
+                if not audio.channels[i].audio.gpio_active:
+                    audio.channels[i].audio.gpio_active = 1
+                    print(f"[GPIO] Channel {global_channel_ids[0]} audio ENABLED (re-sync: PIN 38 is active)")
+                break
+    
+    if gpio_40_state == 0:
+        for i in range(4):
+            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[1]:
+                if not audio.channels[i].audio.gpio_active:
+                    audio.channels[i].audio.gpio_active = 1
+                    print(f"[GPIO] Channel {global_channel_ids[1]} audio ENABLED (re-sync: PIN 40 is active)")
+                break
+    
+    if gpio_16_state == 0:
+        for i in range(4):
+            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[2]:
+                if not audio.channels[i].audio.gpio_active:
+                    audio.channels[i].audio.gpio_active = 1
+                    print(f"[GPIO] Channel {global_channel_ids[2]} audio ENABLED (re-sync: PIN 16 is active)")
+                break
+    
+    if gpio_18_state == 0 and global_channel_count > 3:
+        for i in range(4):
+            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
+                if not audio.channels[i].audio.gpio_active:
+                    audio.channels[i].audio.gpio_active = 1
+                    print(f"[GPIO] Channel {global_channel_ids[3]} audio ENABLED (re-sync: PIN 18 is active)")
+                break
+    
     status_counter = 0
     mqtt_keepalive_counter = 0
     
