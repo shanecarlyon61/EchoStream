@@ -120,20 +120,16 @@ def initialize_system() -> bool:
     print("[MAIN] Setting up event coordinator...")
     event_coordinator.setup_event_handlers()
     
-    # 9. Connect WebSocket
-    print("[MAIN] Connecting to WebSocket server...")
+    # 9. Setup WebSocket (will be connected in worker thread)
+    print("[MAIN] Setting up WebSocket...")
     ws_url = "wss://audio.redenes.org/ws/"
-    if not websocket_client.connect_to_server(ws_url):
-        print("[MAIN] ERROR: Failed to connect to WebSocket", file=sys.stderr)
-        return False
     
-    # Register channels with WebSocket
-    channel_manager.register_channels_with_websocket()
-    
-    # Setup UDP config callback
+    # Setup UDP config callback (will be called when WebSocket receives UDP config)
     websocket_client.set_udp_config_callback(
         lambda udp_config: event_coordinator.handle_udp_ready(udp_config)
     )
+    
+    # Note: WebSocket connection will be established in worker thread
     
     print("[MAIN] System initialization complete")
     return True
@@ -299,9 +295,17 @@ def main():
     tone_detection.start_tone_detection()
     
     # Print system status
+    # Wait a moment for WebSocket to connect and register channels
+    time.sleep(2)
+    
     print("\n" + "=" * 60)
     print("[MAIN] EchoStream system ready")
-    print(f"[MAIN] {global_channel_count} channel(s) active")
+    
+    # Get actual active channel count
+    import channel_manager
+    active_channels = channel_manager.get_all_channels()
+    print(f"[MAIN] {len(active_channels)} channel(s) active")
+    
     print("[MAIN] Press Ctrl+C to stop")
     print("=" * 60 + "\n")
     

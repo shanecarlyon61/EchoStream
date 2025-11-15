@@ -193,9 +193,9 @@ def _load_tone_detection_config(channel_config: ChannelConfig, channel_obj: Dict
     if alert_tones:
         print(f"[CONFIG] Found {len(alert_tones)} tone definition(s) for channel {channel_index + 1}")
         
-        # Import tone_detect module (avoid circular import)
+        # Import tone_detection module (avoid circular import)
         try:
-            import tone_detect
+            import tone_detection
             tones_loaded = 0
             
             for tone_obj in alert_tones:
@@ -212,7 +212,7 @@ def _load_tone_detection_config(channel_config: ChannelConfig, channel_obj: Dict
                 detection_tone_alert = tone_obj.get('detection_tone_alert', '')
                 
                 if tone_id and tone_a > 0 and tone_b > 0:
-                    if tone_detect.add_tone_definition(
+                    if tone_detection.add_tone_definition(
                         tone_id, tone_a, tone_b,
                         tone_a_length, tone_b_length,
                         tone_a_range, tone_b_range,
@@ -224,8 +224,8 @@ def _load_tone_detection_config(channel_config: ChannelConfig, channel_obj: Dict
             
             if tones_loaded > 0:
                 print(f"[CONFIG] Successfully loaded {tones_loaded} tone definition(s) for channel {channel_index + 1}")
-        except ImportError:
-            print("[CONFIG] WARNING: tone_detect module not available yet")
+        except ImportError as e:
+            print(f"[CONFIG] WARNING: tone_detection module not available: {e}")
     else:
         print(f"[CONFIG] WARNING: No alert_tones array found for channel {channel_index + 1}")
     

@@ -23,6 +23,9 @@ global_ws_client: Optional[websockets.WebSocketClientProtocol] = None
 ws_connected = False
 ws_url: Optional[str] = None
 
+# Event loop for WebSocket thread
+ws_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
 # WebSocket message handlers
 message_handlers: Dict[str, Callable[[Dict[str, Any]], None]] = {}
 
@@ -75,6 +78,7 @@ async def connect_to_server_async(url: str) -> bool:
 def connect_to_server(url: str) -> bool:
     """
     Connect to WebSocket server (synchronous wrapper).
+    Note: This should only be called from the WebSocket thread!
     
     Args:
         url: WebSocket server URL
@@ -82,10 +86,27 @@ def connect_to_server(url: str) -> bool:
     Returns:
         True if connection successful, False otherwise
     """
+    global ws_event_loop
+    
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(connect_to_server_async(url))
+        # Use existing event loop if in WebSocket thread, otherwise create new one
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, use the thread's event loop if set
+            if ws_event_loop is not None:
+                loop = ws_event_loop
+            else:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        
+        if loop.is_running():
+            # Loop is running, use run_coroutine_threadsafe
+            future = asyncio.run_coroutine_threadsafe(connect_to_server_async(url), loop)
+            result = future.result(timeout=10.0)
+        else:
+            # Loop not running, can use run_until_complete
+            result = loop.run_until_complete(connect_to_server_async(url))
         return result
     except Exception as e:
         print(f"[WEBSOCKET] ERROR: Exception in connect_to_server: {e}")
@@ -159,6 +180,7 @@ async def send_message_async(message: str) -> bool:
 def send_message(message: str) -> bool:
     """
     Send a message to the WebSocket server (synchronous wrapper).
+    Thread-safe: uses run_coroutine_threadsafe if called from different thread.
     
     Args:
         message: Message string to send
@@ -166,19 +188,34 @@ def send_message(message: str) -> bool:
     Returns:
         True if message sent successfully, False otherwise
     """
-    global global_ws_client
+    global global_ws_client, ws_event_loop
     
     if global_ws_client is None:
         return False
     
     try:
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(send_message_async(message))
-    except RuntimeError:
-        # No event loop running, create new one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(send_message_async(message))
+        # Try to get the WebSocket event loop
+        if ws_event_loop is not None and ws_event_loop.is_running():
+            # Use run_coroutine_threadsafe for thread safety
+            future = asyncio.run_coroutine_threadsafe(send_message_async(message), ws_event_loop)
+            return future.result(timeout=5.0)
+        else:
+            # Fallback: try current event loop
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(send_message_async(message), loop)
+                    return future.result(timeout=5.0)
+                else:
+                    return loop.run_until_complete(send_message_async(message))
+            except RuntimeError:
+                # No event loop, create new one (shouldn't happen normally)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(send_message_async(message))
+                finally:
+                    loop.close()
     except Exception as e:
         print(f"[WEBSOCKET] ERROR: Exception in send_message: {e}")
         return False
@@ -444,23 +481,49 @@ def global_websocket_thread(url: str):
     Args:
         url: WebSocket server URL
     """
+    global ws_event_loop
+    
     print("[WEBSOCKET] Starting WebSocket thread")
     
-    # Connect to server
-    if not connect_to_server(url):
-        print("[WEBSOCKET] ERROR: Failed to connect, thread exiting")
-        return
+    # Create event loop for this thread
+    ws_event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(ws_event_loop)
     
-    # Create event loop and run handler
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(websocket_handler_async())
+        # Connect to server (async, in this thread's event loop)
+        try:
+            ws_event_loop.run_until_complete(connect_to_server_async(url))
+        except Exception as e:
+            print(f"[WEBSOCKET] ERROR: Failed to connect: {e}")
+            return
+        
+        if not ws_connected:
+            print("[WEBSOCKET] ERROR: Connection not established, thread exiting")
+            return
+        
+        # Register channels after connection (call from event loop thread)
+        try:
+            import channel_manager
+            channel_manager.register_channels_with_websocket()
+        except Exception as e:
+            print(f"[WEBSOCKET] WARNING: Failed to register channels: {e}")
+        
+        # Run handler loop
+        ws_event_loop.run_until_complete(websocket_handler_async())
+        
     except Exception as e:
         print(f"[WEBSOCKET] ERROR: Exception in WebSocket thread: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        disconnect()
-        print("[WEBSOCKET] WebSocket thread stopped")
+        # Disconnect and cleanup
+        try:
+            if global_ws_client is not None:
+                ws_event_loop.run_until_complete(disconnect_async())
+        except Exception as e:
+            print(f"[WEBSOCKET] ERROR: Exception during disconnect: {e}")
+        finally:
+            ws_event_loop.close()
+            ws_event_loop = None
+            print("[WEBSOCKET] WebSocket thread stopped")
 
