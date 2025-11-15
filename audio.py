@@ -577,28 +577,34 @@ def audio_output_worker(audio_stream: AudioStream):
                 is_silence = rms < 0.001  # Threshold for silence detection
                 
                 # Log buffer status more frequently to diagnose the issue
-                if output_count % 500 == 0:  # Log every ~10 seconds (500 * 21.3ms = ~10.6s)
+                if output_count % 500 == 0:  # Log every ~10 seconds
                     with audio_stream.output_jitter.mutex:
                         jitter_frames = audio_stream.output_jitter.frame_count
                         read_idx = audio_stream.output_jitter.read_index
                         write_idx = audio_stream.output_jitter.write_index
                     
-                    elapsed_ms = elapsed * 1000
+                    # Check packet reception count
+                    packets_received = 0
+                    if hasattr(process_received_audio, '_receive_count'):
+                        receive_count_dict = getattr(process_received_audio, '_receive_count', {})
+                        packets_received = receive_count_dict.get(audio_stream.channel_id, 0)
+                    
                     if is_silence:
                         print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing SILENCE "
-                              f"(RMS={rms:.6f}, jitter_frames={jitter_frames}, elapsed={elapsed_ms:.2f}ms, "
+                              f"(RMS={rms:.6f}, jitter_frames={jitter_frames}, packets_received={packets_received}, "
                               f"read_idx={read_idx}, write_idx={write_idx})")
                     else:
                         print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing AUDIO "
-                              f"(RMS={rms:.4f}, jitter_frames={jitter_frames}, elapsed={elapsed_ms:.2f}ms, "
+                              f"(RMS={rms:.4f}, jitter_frames={jitter_frames}, packets_received={packets_received}, "
                               f"read_idx={read_idx}, write_idx={write_idx})")
                     
                     # Warn if buffer is consistently low or empty
                     if jitter_frames == 0:
-                        print(f"[AUDIO WARNING] Channel {audio_stream.channel_id}: Buffer EMPTY during playback!")
+                        print(f"[AUDIO WARNING] Channel {audio_stream.channel_id}: Buffer EMPTY during playback! "
+                              f"UDP packets_received={packets_received} - check if packets are arriving")
                     elif jitter_frames < 2:
                         print(f"[AUDIO WARNING] Channel {audio_stream.channel_id}: Buffer LOW (frames={jitter_frames}) - "
-                              f"packets may not be arriving fast enough")
+                              f"packets_received={packets_received} - may indicate packets not arriving fast enough")
             else:
                 # Fallback: should never happen since we always fill buffer above
                 silence = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
