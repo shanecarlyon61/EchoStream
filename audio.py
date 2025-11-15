@@ -385,8 +385,15 @@ def audio_output_worker(audio_stream: AudioStream):
     buffer_wait_count = 0
     
     # Buffer size: At 48kHz, 1024 samples take ~21.3ms to play
-    # PyAudio's blocking write() will naturally rate-limit to match playback rate
+    # We need to rate-limit to prevent consuming frames faster than they arrive
     FRAMES_PER_BUFFER = 1024
+    SAMPLE_RATE = 48000  # Explicitly set to match echostream.py
+    TIME_PER_BUFFER = FRAMES_PER_BUFFER / SAMPLE_RATE  # ~0.0213 seconds per buffer
+    
+    # Rate limiting: track last write time to ensure we don't write too fast
+    import time
+    last_write_time = time.time()
+    write_count = 0
     
     while not global_interrupted.is_set() and audio_stream.transmitting:
         if audio_stream.output_stream is None:
@@ -529,7 +536,18 @@ def audio_output_worker(audio_stream: AudioStream):
                 samples_to_play = output_buffer
             
             # Play audio (gain already applied during buffer fill)
-            # PyAudio's blocking write() will naturally rate-limit to match playback rate
+            # Rate-limit output to match playback rate (48kHz: 1024 samples = ~21.3ms)
+            current_time = time.time()
+            elapsed = current_time - last_write_time
+            
+            # Ensure we don't write faster than playback rate
+            # At 48kHz, 1024 samples should take ~21.3ms to play
+            if elapsed < TIME_PER_BUFFER:
+                # Wait for the remaining time to maintain correct playback rate
+                sleep_time = TIME_PER_BUFFER - elapsed
+                time.sleep(sleep_time)
+                current_time = time.time()
+            
             # Always write the full buffer (1024 samples) - this matches C implementation
             if samples_to_play is not None and len(samples_to_play) > 0:
                 # Ensure samples are in correct format (gain already applied)
@@ -546,7 +564,16 @@ def audio_output_worker(audio_stream: AudioStream):
                     samples_to_play = samples_to_play[:FRAMES_PER_BUFFER]
                 
                 audio_bytes = samples_to_play.astype(np.float32).tobytes()
-                audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
+                
+                # Write to output stream (this should block if buffer is full)
+                try:
+                    audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
+                    last_write_time = time.time()
+                    write_count += 1
+                except Exception as e:
+                    print(f"[AUDIO ERROR] Channel {audio_stream.channel_id}: Write error: {e}")
+                    time.sleep(0.01)  # Small delay on error
+                    continue
                 
                 output_count += 1
                 
@@ -554,20 +581,40 @@ def audio_output_worker(audio_stream: AudioStream):
                 rms = np.sqrt(np.mean(samples_to_play**2))
                 is_silence = rms < 0.001  # Threshold for silence detection
                 
-                if output_count % 1000 == 0:  # Log every ~10 seconds
+                # Log buffer status more frequently to diagnose the issue
+                if output_count % 500 == 0:  # Log every ~10 seconds (500 * 21.3ms = ~10.6s)
                     with audio_stream.output_jitter.mutex:
                         jitter_frames = audio_stream.output_jitter.frame_count
+                        read_idx = audio_stream.output_jitter.read_index
+                        write_idx = audio_stream.output_jitter.write_index
                     
+                    elapsed_ms = elapsed * 1000
                     if is_silence:
                         print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing SILENCE "
-                              f"(RMS={rms:.6f}, jitter_frames={jitter_frames}, samples={len(samples_to_play)})")
+                              f"(RMS={rms:.6f}, jitter_frames={jitter_frames}, elapsed={elapsed_ms:.2f}ms, "
+                              f"read_idx={read_idx}, write_idx={write_idx})")
                     else:
                         print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing AUDIO "
-                              f"(RMS={rms:.4f}, jitter_frames={jitter_frames}, samples={len(samples_to_play)})")
+                              f"(RMS={rms:.4f}, jitter_frames={jitter_frames}, elapsed={elapsed_ms:.2f}ms, "
+                              f"read_idx={read_idx}, write_idx={write_idx})")
+                    
+                    # Warn if buffer is consistently low or empty
+                    if jitter_frames == 0:
+                        print(f"[AUDIO WARNING] Channel {audio_stream.channel_id}: Buffer EMPTY during playback!")
+                    elif jitter_frames < 2:
+                        print(f"[AUDIO WARNING] Channel {audio_stream.channel_id}: Buffer LOW (frames={jitter_frames}) - "
+                              f"packets may not be arriving fast enough")
             else:
                 # Fallback: should never happen since we always fill buffer above
                 silence = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
-                audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
+                try:
+                    audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
+                    last_write_time = time.time()
+                except Exception as e:
+                    print(f"[AUDIO ERROR] Channel {audio_stream.channel_id}: Silence write error: {e}")
+                    time.sleep(0.01)
+                    continue
+                
                 silence_count += 1
                 if silence_count % 1000 == 0:  # Log every ~10 seconds
                     with audio_stream.output_jitter.mutex:
