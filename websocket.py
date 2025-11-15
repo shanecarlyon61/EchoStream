@@ -166,6 +166,14 @@ async def websocket_handler():
                                             
                                             if audio.start_transmission_for_channel(audio.channels[i].audio):
                                                 print(f"Audio transmission ready for channel {audio.channels[i].audio.channel_id} (waiting for GPIO activation)")
+                                                
+                                                # IMPORTANT: After UDP is configured and audio streams are started,
+                                                # resend transmit_started for channels with active GPIO
+                                                # This ensures the server knows the client is transmitting after UDP is ready
+                                                # The server only sends audio when it receives transmit_started
+                                                if audio.channels[i].audio.gpio_active:
+                                                    print(f"[UDP READY] Resending transmit_started for channel {audio.channels[i].audio.channel_id} (GPIO active, UDP now ready)")
+                                                    send_websocket_transmit_event(audio.channels[i].audio.channel_id, 1)
                                         else:
                                             print(f"Key decode failed for channel {audio.channels[i].audio.channel_id}")
                     elif 'users_connected' in str(data):
