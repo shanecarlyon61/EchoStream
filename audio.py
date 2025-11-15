@@ -495,7 +495,8 @@ def audio_output_worker(audio_stream: AudioStream):
                         # Wait a bit more to allow buffer to fill to minimum threshold
                         time.sleep(0.02)  # Wait 20ms for more packets
                         continue  # Skip this iteration, try again next loop
-                        else:
+                    else:
+                        if jitter_frames == 0:
                             # Buffer was full but now empty - underrun condition
                             # Match C: fill with silence but log the underrun
                             static_underrun_count = getattr(audio_output_worker, '_underrun_count', {})
