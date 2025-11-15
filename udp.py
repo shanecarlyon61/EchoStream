@@ -140,10 +140,11 @@ def udp_listener_worker(arg=None):
     
     while not global_interrupted.is_set():
         try:
-            # Set socket timeout to allow checking global_interrupted
-            # Use a longer timeout initially to match C's blocking behavior more closely
-            # But still allow interrupt checking
-            global_udp_socket.settimeout(1.0)  # 1 second timeout (was 0.1s)
+            # Match C implementation: Use blocking recvfrom() with no timeout
+            # C uses blocking recvfrom() which waits indefinitely for packets
+            # Python needs a timeout to check global_interrupted, but use a long timeout
+            # to match C's blocking behavior as closely as possible
+            global_udp_socket.settimeout(10.0)  # 10 second timeout (long enough to be effectively blocking)
             
             buffer, client_addr = global_udp_socket.recvfrom(8192)
             
@@ -266,15 +267,15 @@ def udp_listener_worker(arg=None):
             time_since_last = time.time() - last_packet_time if packet_count > 0 else float('inf')
             elapsed_since_startup = time.time() - startup_time
             
-            # Log timeouts more frequently initially, then occasionally
-            # With 1.0s timeout, timeout 5 = 5 seconds
-            if timeout_count <= 10 or timeout_count % 50 == 0:
+            # Log timeouts occasionally (with 10s timeout, timeouts are rare)
+            # Only log if we've been waiting a while
+            if timeout_count % 6 == 0:  # Log every 6th timeout (60 seconds)
                 print(f"[UDP] Timeout #{timeout_count} waiting for packets (total_packets={packet_count}, "
                       f"time_since_last_packet={time_since_last:.2f}s, elapsed={elapsed_since_startup:.1f}s)")
                 
                 # Warn if we've been waiting a long time without packets
-                if timeout_count == 5:  # 5 seconds with 1.0s timeout
-                    print(f"[UDP WARNING] 5 timeouts reached (5 seconds) - no packets received!")
+                if timeout_count == 6:  # 60 seconds with 10s timeout
+                    print(f"[UDP WARNING] 60 seconds elapsed - no packets received!")
                     print(f"[UDP WARNING] Possible causes:")
                     print(f"[UDP WARNING]   1. Server only sends audio when client is transmitting")
                     print(f"[UDP WARNING]   2. Check GPIO is active and input audio is being captured")
