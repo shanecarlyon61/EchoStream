@@ -363,9 +363,14 @@ def audio_input_worker(audio_stream: AudioStream):
 
 def audio_output_worker(audio_stream: AudioStream):
     """Audio output worker thread - plays audio from jitter buffer or passthrough"""
-    from echostream import global_interrupted, SAMPLE_RATE
+    from echostream import global_interrupted
     import tone_detect
-    import time
+    
+    # Initialize last packet time tracking (if not already initialized)
+    if not hasattr(audio_output_worker, '_last_packet_time'):
+        audio_output_worker._last_packet_time = {}
+    if not hasattr(audio_output_worker, '_underrun_count'):
+        audio_output_worker._underrun_count = {}
     
     print(f"[AUDIO] Output worker started for channel {audio_stream.channel_id}")
     
@@ -377,7 +382,6 @@ def audio_output_worker(audio_stream: AudioStream):
     # Minimum buffer threshold - wait until we have at least 2 frames before starting playback
     # This prevents choppy audio from buffer underruns
     MIN_BUFFER_THRESHOLD = 2
-    buffer_ready = False
     buffer_wait_count = 0
     
     # Buffer size: At 48kHz, 1024 samples take ~21.3ms to play
