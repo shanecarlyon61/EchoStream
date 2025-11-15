@@ -604,7 +604,6 @@ def audio_output_worker(audio_stream: AudioStream):
                 silence = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
                 try:
                     audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
-                    last_write_time = time.time()
                 except Exception as e:
                     print(f"[AUDIO ERROR] Channel {audio_stream.channel_id}: Silence write error: {e}")
                     time.sleep(0.01)
@@ -619,7 +618,9 @@ def audio_output_worker(audio_stream: AudioStream):
             
         except Exception as e:
             if not global_interrupted.is_set():
+                import traceback
                 print(f"[AUDIO] Output error for {audio_stream.channel_id}: {e}")
+                traceback.print_exc()
             time.sleep(0.1)
     
     print(f"[AUDIO] Output worker stopped for channel {audio_stream.channel_id}")
