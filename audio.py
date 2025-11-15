@@ -404,23 +404,51 @@ def audio_output_worker(audio_stream: AudioStream):
             
             # Check if this is passthrough target and passthrough is active
             if is_passthrough_target and tone_detect.global_tone_detection.passthrough_active:
-                # Read from shared buffer (input audio from source channel)
-                with global_shared_buffer.mutex:
-                    if global_shared_buffer.valid and global_shared_buffer.sample_count > 0:
-                        # Get samples from shared buffer
-                        take = min(1024, global_shared_buffer.sample_count)
-                        samples_to_play = global_shared_buffer.samples[:take].copy()
-                        # Shift remaining samples
-                        if global_shared_buffer.sample_count > take:
-                            remaining = global_shared_buffer.sample_count - take
-                            global_shared_buffer.samples[:remaining] = global_shared_buffer.samples[take:take+remaining]
-                            global_shared_buffer.sample_count = remaining
+                # Check if recording is active (tone detected and timer running)
+                recording = tone_detect.is_recording_active()
+                
+                if recording:
+                    # Recording active - route actual input audio from shared buffer (same audio as EchoStream)
+                    with global_shared_buffer.mutex:
+                        if global_shared_buffer.valid and global_shared_buffer.sample_count > 0:
+                            # Copy actual input audio from shared buffer to output with gain boost
+                            samples_to_copy = min(FRAMES_PER_BUFFER, global_shared_buffer.sample_count)
+                            
+                            # Apply gain boost for passthrough audio (make it louder and clearer)
+                            # Match C implementation: 15x gain for passthrough (audio.c line 630)
+                            passthrough_gain = 15.0
+                            samples_to_play = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
+                            
+                            for i in range(samples_to_copy):
+                                sample = global_shared_buffer.samples[i] * passthrough_gain
+                                # Clamp to prevent distortion
+                                if sample > 1.0:
+                                    sample = 1.0
+                                elif sample < -1.0:
+                                    sample = -1.0
+                                samples_to_play[i] = sample
+                            
+                            # If we need more samples, repeat the last sample or fill with silence
+                            # Match C implementation: repeat last sample to avoid clicks (audio.c line 642-644)
+                            if samples_to_copy < FRAMES_PER_BUFFER:
+                                last_sample = global_shared_buffer.samples[samples_to_copy - 1] * passthrough_gain if samples_to_copy > 0 else 0.0
+                                if last_sample > 1.0:
+                                    last_sample = 1.0
+                                elif last_sample < -1.0:
+                                    last_sample = -1.0
+                                for i in range(samples_to_copy, FRAMES_PER_BUFFER):
+                                    samples_to_play[i] = last_sample  # Repeat last sample to avoid clicks
+                            
+                            # DON'T mark buffer as invalid - let input callback overwrite it
+                            # This ensures continuous audio flow even if input callback is slightly delayed
+                            # Match C implementation comment (audio.c line 648)
                         else:
-                            global_shared_buffer.valid = False
-                            global_shared_buffer.sample_count = 0
-                    else:
-                        # No passthrough audio available - output silence
-                        samples_to_play = None
+                            # Buffer not ready yet - output silence for this frame
+                            # (input callback will update buffer soon)
+                            samples_to_play = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
+                else:
+                    # No recording active - output silence
+                    samples_to_play = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
             
             # If not passthrough or no passthrough data, get from jitter buffer
             # Match C implementation: accumulate samples from multiple frames to fill requested buffer
@@ -761,7 +789,9 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                               f"frames={audio_stream.output_jitter.frame_count}/{JITTER_BUFFER_SIZE}, "
                               f"read_idx={audio_stream.output_jitter.read_index}")
                 else:
-                    # Buffer full, drop oldest
+                    # Buffer full, drop oldest frame and add new one
+                    # Match C implementation: when buffer is full, use 10x gain instead of 20x
+                    # (api_call.c line 1596 uses 10x when buffer overflows)
                     old_read_idx = audio_stream.output_jitter.read_index
                     audio_stream.output_jitter.read_index = (
                         audio_stream.output_jitter.read_index + 1
@@ -769,7 +799,19 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                     audio_stream.output_jitter.frame_count -= 1
                     
                     frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.write_index]
-                    frame.samples[:len(float_samples)] = float_samples
+                    
+                    # Apply 10x gain boost when buffer is full (instead of 20x)
+                    # This matches C implementation in api_call.c line 1596
+                    overflow_gain = 10.0
+                    for j in range(len(float_samples)):
+                        sample = (pcm_array[j] / 32767.0) * overflow_gain
+                        # Clamp to prevent distortion
+                        if sample > 1.0:
+                            sample = 1.0
+                        elif sample < -1.0:
+                            sample = -1.0
+                        frame.samples[j] = sample
+                    
                     frame.sample_count = len(float_samples)
                     frame.valid = True
                     
@@ -780,7 +822,7 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                     # Log when buffer overflows (drops frames)
                     if static_receive_count[channel_id] % 100 == 0:
                         print(f"[JITTER OVERFLOW] Channel {channel_id}: Buffer full, dropped frame at idx {old_read_idx}, "
-                              f"frames={audio_stream.output_jitter.frame_count}/{JITTER_BUFFER_SIZE}")
+                              f"frames={audio_stream.output_jitter.frame_count}/{JITTER_BUFFER_SIZE} (using 10x gain)")
                 
                 # Log buffer status when it transitions from empty to having data
                 if buffer_before == 0 and audio_stream.output_jitter.frame_count > 0:
