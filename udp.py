@@ -138,13 +138,18 @@ def udp_listener_worker(arg=None):
             packet_count += 1
             last_packet_time = time.time()
             
+            # Reset timeout count on successful receive
+            timeout_count = 0
+            
             # Log ALL packets initially (first 20), then occasionally
             if packet_count <= 20:
                 print(f"[UDP RX] Received packet #{packet_count} from {client_addr} ({len(buffer)} bytes)")
             elif packet_count % 500 == 0:
                 print(f"[UDP RX] Received packet #{packet_count} from {client_addr} ({len(buffer)} bytes)")
             
-            timeout_count = 0  # Reset timeout count on successful receive
+            # Log when we receive packets after timeouts (important for diagnosing)
+            if timeout_count > 0:
+                print(f"[UDP RX] Packet received after {timeout_count} timeouts! Packet #{packet_count} from {client_addr}")
             
             if buffer:
                 try:
@@ -244,11 +249,22 @@ def udp_listener_worker(arg=None):
         except socket.timeout:
             # Timeout is expected, continue loop
             timeout_count += 1
+            time_since_last = time.time() - last_packet_time if packet_count > 0 else float('inf')
+            
             # Log timeouts more frequently initially, then occasionally
+            # Timeout 50 = 5 seconds (50 * 0.1s = 5s) - this is when user reports choppy audio starts
             if timeout_count <= 50 or timeout_count % 500 == 0:
-                time_since_last = time.time() - last_packet_time if packet_count > 0 else float('inf')
-                print(f"[UDP] Timeout waiting for packets (timeout_count={timeout_count}, packets_received={packet_count}, "
-                      f"time_since_last_packet={time_since_last:.2f}s)")
+                print(f"[UDP] Timeout #{timeout_count} waiting for packets (total_packets={packet_count}, "
+                      f"time_since_last_packet={time_since_last:.2f}s, elapsed={timeout_count*0.1:.1f}s)")
+                
+                # Warn if we've been waiting a long time without packets
+                if timeout_count == 50:
+                    print(f"[UDP WARNING] 50 timeouts reached (5 seconds) - no packets received!")
+                    print(f"[UDP WARNING] This may indicate: network issue, server stopped sending, or NAT timeout")
+                    if packet_count == 0:
+                        print(f"[UDP WARNING] NO packets received since startup - check network/firewall/server")
+                    else:
+                        print(f"[UDP WARNING] Last packet was {time_since_last:.1f}s ago - packets may have stopped arriving")
             continue
         except Exception as e:
             if not global_interrupted.is_set():
