@@ -623,15 +623,18 @@ def audio_output_worker(audio_stream: AudioStream):
                 # CRITICAL: Always wait for TIME_PER_BUFFER to match hardware playback rate
                 # The C implementation uses hardware callbacks which are automatically timed
                 # In Python, we must manually ensure we don't write faster than hardware can play
+                # At 48kHz, 1024 samples = 21.33ms - we MUST wait this long between writes
                 # Even if PyAudio's write() doesn't block, we must rate-limit ourselves
+                
+                # Calculate how long to wait to match hardware playback rate
                 if elapsed < TIME_PER_BUFFER:
                     sleep_time = TIME_PER_BUFFER - elapsed
-                    time.sleep(sleep_time)  # Always wait to match hardware rate
-                    current_time = time.time()  # Update time after sleep
-                else:
-                    # If we're behind (elapsed > TIME_PER_BUFFER), don't wait
-                    # This allows catch-up if we fell behind due to processing delays
-                    pass
+                    # Always wait the full time to match hardware rate exactly
+                    if sleep_time > 0.0001:  # Only sleep if > 0.1ms
+                        time.sleep(sleep_time)
+                        current_time = time.time()  # Update time after sleep
+                # If elapsed >= TIME_PER_BUFFER, we're already at or behind schedule
+                # Don't wait - write immediately to catch up
                 
                 try:
                     # PyAudio's write() may not block if its internal buffer has space,
