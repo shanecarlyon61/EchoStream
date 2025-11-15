@@ -6,6 +6,7 @@ import threading
 import json
 import os
 import time
+import select
 from typing import Optional
 from echostream import global_interrupted, MAX_CHANNELS
 import audio
