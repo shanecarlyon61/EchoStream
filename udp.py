@@ -119,19 +119,31 @@ def udp_listener_worker(arg=None):
     if global_server_addr:
         print(f"[UDP] Server address: {global_server_addr}")
     
+    # Get socket info for debugging
+    try:
+        local_addr = global_udp_socket.getsockname()
+        print(f"[UDP] Socket bound to: {local_addr[0]}:{local_addr[1]}")
+    except Exception as e:
+        print(f"[UDP] Could not get socket info: {e}")
+    
     udp_debug_count = 0
     
     packet_count = 0
     timeout_count = 0
     last_packet_time = time.time()
+    startup_time = time.time()
     
     # Log initial state
     print(f"[UDP] Listener started, waiting for packets...")
+    print(f"[UDP] NOTE: Server may only send audio when client is transmitting!")
+    print(f"[UDP] Make sure GPIO is active and input audio is being captured.")
     
     while not global_interrupted.is_set():
         try:
             # Set socket timeout to allow checking global_interrupted
-            global_udp_socket.settimeout(0.1)
+            # Use a longer timeout initially to match C's blocking behavior more closely
+            # But still allow interrupt checking
+            global_udp_socket.settimeout(1.0)  # 1 second timeout (was 0.1s)
             
             buffer, client_addr = global_udp_socket.recvfrom(8192)
             
@@ -252,19 +264,24 @@ def udp_listener_worker(arg=None):
             # Timeout is expected, continue loop
             timeout_count += 1
             time_since_last = time.time() - last_packet_time if packet_count > 0 else float('inf')
+            elapsed_since_startup = time.time() - startup_time
             
             # Log timeouts more frequently initially, then occasionally
-            # Timeout 50 = 5 seconds (50 * 0.1s = 5s) - this is when user reports choppy audio starts
-            if timeout_count <= 50 or timeout_count % 500 == 0:
+            # With 1.0s timeout, timeout 5 = 5 seconds
+            if timeout_count <= 10 or timeout_count % 50 == 0:
                 print(f"[UDP] Timeout #{timeout_count} waiting for packets (total_packets={packet_count}, "
-                      f"time_since_last_packet={time_since_last:.2f}s, elapsed={timeout_count*0.1:.1f}s)")
+                      f"time_since_last_packet={time_since_last:.2f}s, elapsed={elapsed_since_startup:.1f}s)")
                 
                 # Warn if we've been waiting a long time without packets
-                if timeout_count == 50:
-                    print(f"[UDP WARNING] 50 timeouts reached (5 seconds) - no packets received!")
-                    print(f"[UDP WARNING] This may indicate: network issue, server stopped sending, or NAT timeout")
+                if timeout_count == 5:  # 5 seconds with 1.0s timeout
+                    print(f"[UDP WARNING] 5 timeouts reached (5 seconds) - no packets received!")
+                    print(f"[UDP WARNING] Possible causes:")
+                    print(f"[UDP WARNING]   1. Server only sends audio when client is transmitting")
+                    print(f"[UDP WARNING]   2. Check GPIO is active and input audio is being captured")
+                    print(f"[UDP WARNING]   3. Network/firewall issue blocking UDP packets")
+                    print(f"[UDP WARNING]   4. Server not sending packets yet")
                     if packet_count == 0:
-                        print(f"[UDP WARNING] NO packets received since startup - check network/firewall/server")
+                        print(f"[UDP WARNING] NO packets received since startup - verify client is transmitting audio!")
                     else:
                         print(f"[UDP WARNING] Last packet was {time_since_last:.1f}s ago - packets may have stopped arriving")
             continue

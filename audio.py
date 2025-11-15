@@ -349,8 +349,20 @@ def audio_input_worker(audio_stream: AudioStream):
                                             msg.encode('utf-8'),
                                             udp.global_server_addr
                                         )
+                                        
+                                        # Track audio transmission for debugging
+                                        static_send_count = getattr(audio_input_worker, '_send_count', {})
+                                        if audio_stream.channel_id not in static_send_count:
+                                            static_send_count[audio_stream.channel_id] = 0
+                                        static_send_count[audio_stream.channel_id] += 1
+                                        audio_input_worker._send_count = static_send_count
+                                        
+                                        # Log first few sends and then occasionally
+                                        if static_send_count[audio_stream.channel_id] <= 5 or static_send_count[audio_stream.channel_id] % 500 == 0:
+                                            print(f"[AUDIO TX] Channel {audio_stream.channel_id}: Sent audio packet #{static_send_count[audio_stream.channel_id]} "
+                                                  f"({len(msg)} bytes) to {udp.global_server_addr}")
                                     except Exception as e:
-                                        pass  # Silently handle UDP errors
+                                        print(f"[AUDIO TX ERROR] Channel {audio_stream.channel_id}: Failed to send audio: {e}")
                                 
                                 del encrypted
                     
