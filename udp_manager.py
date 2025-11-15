@@ -384,6 +384,7 @@ def udp_listener_worker():
                 # Socket is ready, try to receive packet(s)
                 # Receive multiple packets if available
                 packets_received = 0
+                first_channel_id = None
                 while True:
                     result = receive_audio_packet()
                     
@@ -391,6 +392,10 @@ def udp_listener_worker():
                         channel_id, encrypted_data = result
                         packet_count += 1
                         packets_received += 1
+                        
+                        # Store first channel ID for logging
+                        if first_channel_id is None:
+                            first_channel_id = channel_id
                         
                         # Call callback if registered
                         if packet_receive_callback:
@@ -417,7 +422,10 @@ def udp_listener_worker():
                     
                     # Log first packet and periodically
                     if packet_count == 1:
-                        print(f"[UDP] ✅ First packet received! (channel: {result[0] if result else 'unknown'})")
+                        if first_channel_id:
+                            print(f"[UDP] ✅ First packet received! (channel: {first_channel_id})")
+                        else:
+                            print(f"[UDP] ✅ First packet received!")
                     elif packet_count % 500 == 0:  # Every ~10 seconds at 50 packets/sec
                         print(f"[UDP] Received {packet_count} packets total")
             else:
