@@ -1,265 +1,349 @@
 """
-EchoStream Main - Main entry point for the EchoStream application
+EchoStream Main - Application entry point
+
+This module initializes all components, starts worker threads,
+and manages the application lifecycle.
 """
 import signal
 import sys
 import time
 import threading
-from echostream import global_interrupted, global_channel_ids, global_channel_count, MAX_CHANNELS, CHANNEL_ID_LEN
+from echostream import (
+    global_interrupted, global_channel_ids, global_channel_count,
+    MAX_CHANNELS
+)
 import config
-import audio
-import websocket
 import gpio
-import udp
-import mqtt
-import tone_detect
-import s3_upload
+import audio_hardware
+import channel_manager
+import websocket_client
+import udp_manager
+import event_coordinator
+import tone_detection
+import audio_workers
 
-def handle_interrupt(sig, frame):
-    """Handle interrupt signal (Ctrl+C)"""
-    print("\nShutdown signal received, cleaning up...")
+
+# ============================================================================
+# Signal Handlers
+# ============================================================================
+
+def handle_shutdown(sig, frame):
+    """Handle shutdown signal (SIGINT, SIGTERM)."""
+    print("\n[MAIN] Shutdown signal received, cleaning up...")
     global_interrupted.set()
     
-    # Cleanup audio devices
-    audio.cleanup_audio_devices()
-    
-    # Close WebSocket
-    if websocket.global_ws_client:
-        websocket.global_ws_client = None
-    
-    # Stop audio streams
-    for i in range(MAX_CHANNELS):
-        if audio.channels[i].active:
-            audio.channels[i].audio.transmitting = False
-            
-            if audio.channels[i].audio.input_stream:
-                try:
-                    audio.channels[i].audio.input_stream.stop_stream()
-                    audio.channels[i].audio.input_stream.close()
-                except Exception:
-                    pass
-                audio.channels[i].audio.input_stream = None
-            
-            if audio.channels[i].audio.output_stream:
-                try:
-                    audio.channels[i].audio.output_stream.stop_stream()
-                    audio.channels[i].audio.output_stream.close()
-                except Exception:
-                    pass
-                audio.channels[i].audio.output_stream = None
-    
-    # Close UDP socket
-    if udp.global_udp_socket:
-        try:
-            udp.global_udp_socket.close()
-        except Exception:
-            pass
-        udp.global_udp_socket = None
-    
-    # Stop audio passthrough
-    audio.stop_audio_passthrough()
-    
-    # Stop tone detection
-    tone_detect.stop_tone_detection()
-    
-    # Cleanup MQTT
-    mqtt.cleanup_mqtt()
-    
-    # Terminate PyAudio
-    if audio.pa_instance:
-        try:
-            audio.pa_instance.terminate()
-        except Exception:
-            pass
+    cleanup_all()
 
-def main():
-    """Main function"""
-    # Initialize global variables
-    global_interrupted.clear()
+
+# ============================================================================
+# Initialization Functions
+# ============================================================================
+
+def initialize_system() -> bool:
+    """
+    Initialize all system components.
     
-    # Load channel configuration from JSON file
-    print("Loading channel configuration from /home/will/.an/config.json...")
+    Returns:
+        True if initialization successful, False otherwise
+    """
+    print("[MAIN] Initializing EchoStream system...")
+    
+    # 1. Load configuration
+    print("[MAIN] Loading configuration...")
     channel_ids = [""] * MAX_CHANNELS
-    global_channel_count = config.load_channel_config(channel_ids)
+    channel_count = config.load_channel_config(channel_ids)
     
-    if global_channel_count > 0:
-        for i in range(global_channel_count):
-            global_channel_ids[i] = channel_ids[i]
-        print(f"Successfully loaded {global_channel_count} channels from config")
+    if channel_count > 0:
+        for i in range(channel_count):
+            if i < MAX_CHANNELS:
+                global_channel_ids[i] = channel_ids[i]
+        global_channel_count = channel_count
+        print(f"[MAIN] Loaded {channel_count} channel(s) from config")
     else:
-        print("No channels loaded from config, using generic defaults")
-        for i in range(4):
+        print("[MAIN] WARNING: No channels loaded from config, using defaults")
+        for i in range(min(4, MAX_CHANNELS)):
             global_channel_ids[i] = f"channel_{i + 1}"
-        global_channel_count = 4
+        global_channel_count = min(4, MAX_CHANNELS)
     
-    # Initialize tone detection system FIRST (before loading config)
-    # This creates the global_tone_detection object that config will populate
-    if not tone_detect.init_tone_detection():
-        print("Failed to initialize tone detection system", file=sys.stderr)
-        return 1
+    # 2. Initialize tone detection (must be done before loading complete config)
+    print("[MAIN] Initializing tone detection system...")
+    if not tone_detection.init_tone_detection():
+        print("[MAIN] ERROR: Failed to initialize tone detection system", file=sys.stderr)
+        return False
     
-    # Load complete configuration including tone detection settings
-    # This will add tone definitions to the already-initialized global_tone_detection
-    print("[MAIN] Loading complete configuration from /home/will/.an/config.json...")
-    if config.load_complete_config():
-        print("[MAIN] Complete configuration loaded successfully")
-    else:
-        print("[MAIN] ERROR: Failed to load JSON config - NO TONE DETECTION AVAILABLE")
-        print("[MAIN] Please check /home/will/.an/config.json file exists and is readable")
-        return 1
+    # 3. Load complete configuration (includes tone definitions)
+    print("[MAIN] Loading complete configuration...")
+    if not config.load_complete_config():
+        print("[MAIN] WARNING: Failed to load complete config - tone detection may not work")
+        # Don't fail, continue with defaults
     
-    if not audio.initialize_portaudio():
-        print("PortAudio initialization failed", file=sys.stderr)
-        return 1
+    # 4. Initialize GPIO
+    print("[MAIN] Initializing GPIO...")
+    if not gpio.init_gpio():
+        print("[MAIN] ERROR: Failed to initialize GPIO", file=sys.stderr)
+        return False
     
-    # Initialize audio devices
-    if not audio.initialize_audio_devices():
-        print("Audio device initialization failed", file=sys.stderr)
-        return 1
+    # 5. Initialize audio hardware
+    print("[MAIN] Initializing audio hardware...")
+    if not audio_hardware.init_portaudio():
+        print("[MAIN] ERROR: Failed to initialize PyAudio", file=sys.stderr)
+        return False
     
-    # Initialize tone detection control
-    if not audio.init_tone_detect_control():
-        print("Failed to initialize tone detection control", file=sys.stderr)
-        return 1
+    # Detect USB devices
+    audio_hardware.detect_usb_devices()
     
-    # Initialize shared audio buffer
-    if not audio.init_shared_audio_buffer():
-        print("Failed to initialize shared audio buffer", file=sys.stderr)
-        return 1
+    # 6. Create channels from configuration
+    print(f"[MAIN] Setting up {global_channel_count} channel(s)...")
+    for i in range(global_channel_count):
+        channel_id = global_channel_ids[i]
+        print(f"[MAIN] Setting up channel {i + 1} with ID: {channel_id}")
+        
+        # Get device index for this channel
+        device_index = audio_hardware.get_device_for_channel(i)
+        
+        if device_index < 0:
+            print(f"[MAIN] ERROR: No device available for channel {i + 1} ({channel_id})", file=sys.stderr)
+            return False
+        
+        # Create channel
+        if not channel_manager.create_channel(channel_id, device_index):
+            print(f"[MAIN] ERROR: Failed to create channel {i + 1} ({channel_id})", file=sys.stderr)
+            return False
     
-    # Setup signal handler
-    signal.signal(signal.SIGINT, handle_interrupt)
-    signal.signal(signal.SIGTERM, handle_interrupt)
+    # 7. Initialize shared audio buffer
+    print("[MAIN] Initializing shared audio buffer...")
+    if not audio_workers.init_shared_audio_buffer():
+        print("[MAIN] ERROR: Failed to initialize shared audio buffer", file=sys.stderr)
+        return False
+    
+    # 8. Setup event coordinator
+    print("[MAIN] Setting up event coordinator...")
+    event_coordinator.setup_event_handlers()
+    
+    # 9. Connect WebSocket
+    print("[MAIN] Connecting to WebSocket server...")
+    ws_url = "wss://audio.redenes.org/ws/"
+    if not websocket_client.connect_to_server(ws_url):
+        print("[MAIN] ERROR: Failed to connect to WebSocket", file=sys.stderr)
+        return False
+    
+    # Register channels with WebSocket
+    channel_manager.register_channels_with_websocket()
+    
+    # Setup UDP config callback
+    websocket_client.set_udp_config_callback(
+        lambda udp_config: event_coordinator.handle_udp_ready(udp_config)
+    )
+    
+    print("[MAIN] System initialization complete")
+    return True
+
+
+def start_all_workers() -> bool:
+    """
+    Start all worker threads.
+    
+    Returns:
+        True if all workers started successfully
+    """
+    print("[MAIN] Starting worker threads...")
     
     # Start GPIO monitor thread
-    gpio_thread = threading.Thread(target=gpio.gpio_monitor_worker, daemon=True)
+    gpio_thread = threading.Thread(
+        target=lambda: gpio.monitor_gpio(
+            callback=lambda gpio_num, state: _handle_gpio_callback(gpio_num, state)
+        ),
+        daemon=True
+    )
     gpio_thread.start()
+    print("[MAIN] GPIO monitor thread started")
     
-    print(f"Setting up {global_channel_count} channels...")
+    # Start tone detection worker thread
+    tone_thread = threading.Thread(
+        target=tone_detection_worker,
+        daemon=True
+    )
+    tone_thread.start()
+    print("[MAIN] Tone detection worker thread started")
     
-    # Setup channels
-    for i in range(global_channel_count):
-        print(f"Setting up channel {i + 1} with ID: {global_channel_ids[i]}")
-        if not audio.setup_channel(audio.channels[i], global_channel_ids[i]):
-            print(f"Failed to setup channel {i + 1} ({global_channel_ids[i]})", file=sys.stderr)
-            return 1
+    # Start WebSocket handler thread
+    ws_thread = threading.Thread(
+        target=lambda: websocket_client.global_websocket_thread("wss://audio.redenes.org/ws/"),
+        daemon=True
+    )
+    ws_thread.start()
+    print("[MAIN] WebSocket handler thread started")
     
-    # Initialize audio passthrough
-    if not audio.init_audio_passthrough():
-        print("Failed to initialize audio passthrough", file=sys.stderr)
+    print("[MAIN] All worker threads started")
+    return True
+
+
+def tone_detection_worker():
+    """Tone detection worker thread - processes shared audio buffer."""
+    print("[MAIN] Tone detection worker thread started")
+    
+    process_count = 0
+    
+    while not global_interrupted.is_set():
+        try:
+            # Wait for data in shared buffer
+            with audio_workers.global_shared_buffer.mutex:
+                if not audio_workers.global_shared_buffer.valid:
+                    audio_workers.global_shared_buffer.data_ready.wait(timeout=0.1)
+                
+                if audio_workers.global_shared_buffer.valid and audio_workers.global_shared_buffer.sample_count > 0:
+                    # Read samples from shared buffer
+                    samples, sample_count = audio_workers.global_shared_buffer.read()
+                    
+                    if samples is not None and sample_count > 0:
+                        # Process audio for tone detection
+                        tone_detection.process_audio_samples(samples, sample_count)
+                        process_count += 1
+            
+            time.sleep(0.01)  # Small delay to avoid busy waiting
+            
+        except Exception as e:
+            if not global_interrupted.is_set():
+                print(f"[MAIN] ERROR: Tone detection worker error: {e}")
+            time.sleep(0.1)
+    
+    print("[MAIN] Tone detection worker thread stopped")
+
+
+def _handle_gpio_callback(gpio_num: int, state: int):
+    """Handle GPIO state change callback."""
+    # Find channel ID for this GPIO
+    channel_id = _find_channel_for_gpio(gpio_num)
+    
+    if channel_id:
+        # Route GPIO event through event coordinator
+        event_coordinator.emit_event("gpio_change", {
+            'channel_id': channel_id,
+            'state': state
+        })
+
+
+def _find_channel_for_gpio(gpio_num: int):
+    """Find channel ID for a GPIO number."""
+    import gpio
+    
+    # Find which channel index this GPIO belongs to
+    gpio_list = list(gpio.GPIO_PINS.keys())
+    if gpio_num in gpio_list:
+        channel_index = gpio_list.index(gpio_num)
+        if channel_index < len(global_channel_ids) and channel_index < global_channel_count:
+            return global_channel_ids[channel_index]
+    
+    return None
+
+
+# ============================================================================
+# Cleanup Functions
+# ============================================================================
+
+def cleanup_all():
+    """Cleanup all resources and stop all threads."""
+    print("[MAIN] Starting cleanup...")
+    
+    # Stop tone detection
+    tone_detection.stop_tone_detection()
+    
+    # Stop all channels
+    channel_manager.cleanup_all_channels()
+    
+    # Cleanup GPIO
+    gpio.cleanup_gpio()
+    
+    # Cleanup audio hardware
+    audio_hardware.cleanup_portaudio()
+    
+    # Disconnect WebSocket
+    websocket_client.disconnect()
+    
+    # Cleanup UDP
+    udp_manager.cleanup_udp()
+    udp_manager.stop_heartbeat()
+    
+    # Cleanup event coordinator
+    event_coordinator.cleanup_event_coordinator()
+    
+    print("[MAIN] Cleanup complete")
+
+
+# ============================================================================
+# Main Function
+# ============================================================================
+
+def main():
+    """Main application entry point."""
+    # Setup signal handlers
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    
+    # Initialize global interrupted flag
+    global_interrupted.clear()
+    
+    # Initialize system
+    if not initialize_system():
+        print("[MAIN] ERROR: System initialization failed", file=sys.stderr)
+        cleanup_all()
         return 1
     
-    # Connect global WebSocket
-    if not websocket.connect_global_websocket():
-        print("Failed to connect WebSocket", file=sys.stderr)
-        return 1
-    
-    # Start audio passthrough
-    if not audio.start_audio_passthrough():
-        print("Failed to start audio passthrough", file=sys.stderr)
+    # Start all worker threads
+    if not start_all_workers():
+        print("[MAIN] ERROR: Failed to start worker threads", file=sys.stderr)
+        cleanup_all()
         return 1
     
     # Start tone detection
-    if not tone_detect.start_tone_detection():
-        print("Failed to start tone detection", file=sys.stderr)
-        return 1
+    tone_detection.start_tone_detection()
     
-    # Start tone detection worker thread
-    def tone_detection_worker():
-        """Worker thread that processes shared audio buffer for tone detection"""
-        import audio
-        import tone_detect
-        from echostream import global_interrupted
-        
-        print("[INFO] Tone detection thread started")
-        
-        process_count = 0
-        while not global_interrupted.is_set():
-            try:
-                # Wait for data in shared buffer
-                with audio.global_shared_buffer.mutex:
-                    if not audio.global_shared_buffer.valid:
-                        audio.global_shared_buffer.data_ready.wait(timeout=0.1)
-                    
-                    if audio.global_shared_buffer.valid and audio.global_shared_buffer.sample_count > 0:
-                        # Process audio for tone detection
-                        samples = audio.global_shared_buffer.samples[:audio.global_shared_buffer.sample_count].copy()
-                        sample_count = audio.global_shared_buffer.sample_count
-                        
-                        # Process audio
-                        tone_detect.process_audio_python_approach(samples, sample_count)
-                        process_count += 1
-                    else:
-                        # Debug: Log if buffer is empty
-                        if process_count == 0:
-                            static_empty_count = getattr(tone_detection_worker, '_empty_count', 0)
-                            tone_detection_worker._empty_count = static_empty_count + 1
-                            if static_empty_count % 1000 == 0:  # Log every 1000th empty check
-                                print(f"[TONE DEBUG] Shared buffer empty (valid={audio.global_shared_buffer.valid}, count={audio.global_shared_buffer.sample_count})")
-                
-                time.sleep(0.01)  # Small delay to avoid busy waiting
-            except Exception as e:
-                if not global_interrupted.is_set():
-                    print(f"[ERROR] Tone detection worker error: {e}")
-                time.sleep(0.1)
-        
-        print("[INFO] Tone detection thread stopped")
+    # Print system status
+    print("\n" + "=" * 60)
+    print("[MAIN] EchoStream system ready")
+    print(f"[MAIN] {global_channel_count} channel(s) active")
+    print("[MAIN] Press Ctrl+C to stop")
+    print("=" * 60 + "\n")
     
-    tone_thread = threading.Thread(target=tone_detection_worker, daemon=True)
-    tone_thread.start()
-    
-    # Start WebSocket thread
-    ws_thread = threading.Thread(target=websocket.global_websocket_thread, daemon=True)
-    ws_thread.start()
-    
-    print(f"All {global_channel_count} channels running with single WebSocket. Press Ctrl+C to stop.")
-    print("\n=== SYSTEM BEHAVIOR ===")
+    # Print channel configuration
+    print("=== SYSTEM BEHAVIOR ===")
     print("Channel Configuration:")
     for i in range(global_channel_count):
-        print(f"  Channel {i + 1} ({global_channel_ids[i]}):")
-        print("    - Output: ALWAYS plays EchoStream audio (unaffected by tone detection)")
+        channel_id = global_channel_ids[i]
+        print(f"  Channel {i + 1} ({channel_id}):")
+        print("    - Output: ALWAYS plays EchoStream audio")
         
-        # Check if this channel has tone detection enabled
-        has_tone_detect = False
-        for j in range(MAX_CHANNELS):
-            channel_config = config.get_channel_config(j)
-            if channel_config and channel_config.valid and channel_config.channel_id == global_channel_ids[i]:
-                has_tone_detect = channel_config.tone_detect
-                break
-        
-        if has_tone_detect:
-            print(f"    - Input: {'ENABLED' if audio.is_card1_input_enabled() else 'DISABLED'} (for tone detection and passthrough)")
+        # Check if channel has tone detection enabled
+        channel_config = config.get_channel_config(i)
+        if channel_config and channel_config.valid and channel_config.tone_detect:
+            print("    - Input: ENABLED (for tone detection and passthrough)")
+            
+            # Show passthrough target
+            tone_cfg = channel_config.tone_config
+            if tone_cfg and tone_cfg.tone_passthrough:
+                print(f"    - Passthrough target: {tone_cfg.passthrough_channel}")
         else:
             print("    - Input: ENABLED (no tone detection)")
     
-    # Reflect configured passthrough channel
-    tone_cfg = config.get_tone_detect_config(0)
-    if tone_cfg and tone_cfg.tone_passthrough:
-        print(f"Passthrough output target: {tone_cfg.passthrough_channel}")
+    print("\nTone detection:")
+    print(f"  Status: {'ENABLED' if tone_detection.is_tone_detect_enabled() else 'DISABLED'}")
+    valid_tones = sum(1 for td in tone_detection.global_tone_detection.tone_definitions if td.valid)
+    print(f"  Loaded tone definitions: {valid_tones}")
+    print("=" * 60 + "\n")
     
-    print("\nTone detection control available:")
-    print("  - Call enable_tone_detection() to enable tone detect mode")
-    print("  - Call disable_tone_detection() to disable tone detect mode")
-    print(f"  - Current mode: {'ENABLED' if audio.is_tone_detect_enabled() else 'DISABLED'}")
-    
-    # Wait for threads
+    # Main loop - wait for shutdown
     try:
         while not global_interrupted.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
-        handle_interrupt(None, None)
+        handle_shutdown(None, None)
     
     # Cleanup
-    tone_detect.stop_tone_detection()
-    audio.stop_audio_passthrough()
-    audio.cleanup_audio_devices()
-    mqtt.cleanup_mqtt()
+    cleanup_all()
     
-    if audio.pa_instance:
-        audio.pa_instance.terminate()
-    
+    print("[MAIN] Application terminated")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
-

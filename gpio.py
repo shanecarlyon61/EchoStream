@@ -1,335 +1,321 @@
 """
-GPIO control using lgpio library
+GPIO Controller - Manage GPIO pins for PTT (Push-To-Talk) control
+
+This module handles GPIO pin initialization, monitoring, and state changes
+using the lgpio library for Raspberry Pi GPIO access.
 """
 import lgpio
-import time
 import threading
-from typing import Optional
-from echostream import global_interrupted, global_channel_ids, global_channel_count
-# Import at runtime to avoid circular dependencies
+import time
+from typing import Optional, Callable, Dict
+from echostream import MAX_CHANNELS, global_interrupted
 
-# GPIO state variables
-gpio_38_state = 0
-gpio_40_state = 0
-gpio_16_state = 0
-gpio_18_state = 0
-gpio_mutex = threading.Lock()
+
+# ============================================================================
+# GPIO Pin Mapping
+# ============================================================================
+
+# GPIO pin definitions (GPIO number → physical pin number)
+GPIO_PINS = {
+    20: 38,  # Channel 1 - GPIO 20 → Physical pin 38
+    21: 40,  # Channel 2 - GPIO 21 → Physical pin 40
+    23: 16,  # Channel 3 - GPIO 23 → Physical pin 16
+    24: 18,  # Channel 4 - GPIO 24 → Physical pin 18
+}
+
+# Reverse mapping (physical pin → GPIO number)
+PHYSICAL_TO_GPIO = {pin: gpio for gpio, pin in GPIO_PINS.items()}
 
 # GPIO chip handle
 gpio_chip: Optional[int] = None
+gpio_mutex = threading.Lock()
 
-def init_gpio_pin(pin: int) -> bool:
-    """Initialize GPIO pin as input with pull-up resistor"""
+
+# ============================================================================
+# GPIO State Tracking
+# ============================================================================
+
+# Pin state storage (GPIO number → state: 0=active/low, 1=inactive/high)
+gpio_states: Dict[int, int] = {}
+
+# State change callbacks (GPIO number → callback function)
+gpio_callbacks: Dict[int, Callable[[int, int], None]] = {}
+
+
+# ============================================================================
+# GPIO Initialization and Management
+# ============================================================================
+
+def init_gpio(chip: int = 0) -> bool:
+    """
+    Initialize GPIO chip.
+    
+    Args:
+        chip: GPIO chip number (default: 0)
+        
+    Returns:
+        True if initialization successful, False otherwise
+    """
+    global gpio_chip
+    
+    with gpio_mutex:
+        if gpio_chip is not None:
+            print("[GPIO] GPIO already initialized")
+            return True
+        
+        try:
+            gpio_chip = lgpio.gpiochip_open(chip)
+            if gpio_chip < 0:
+                print(f"[GPIO] ERROR: Failed to open GPIO chip {chip}")
+                return False
+            
+            print(f"[GPIO] GPIO chip {chip} opened successfully")
+            
+            # Initialize all pins
+            for gpio_num, pin_num in GPIO_PINS.items():
+                if init_gpio_pin(gpio_num):
+                    gpio_states[gpio_num] = read_pin(gpio_num)
+                    print(f"[GPIO] PIN {pin_num} (GPIO {gpio_num}) initialized: {'ACTIVE' if gpio_states[gpio_num] == 0 else 'INACTIVE'}")
+                else:
+                    print(f"[GPIO] WARNING: Failed to initialize GPIO {gpio_num}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"[GPIO] ERROR: Exception during GPIO initialization: {e}")
+            gpio_chip = None
+            return False
+
+
+def init_gpio_pin(gpio_num: int) -> bool:
+    """
+    Initialize a single GPIO pin as input with pull-up resistor.
+    
+    Args:
+        gpio_num: GPIO number to initialize
+        
+    Returns:
+        True if initialization successful, False otherwise
+    """
     global gpio_chip
     
     if gpio_chip is None:
-        gpio_chip = lgpio.gpiochip_open(0)
-        if gpio_chip < 0:
-            print(f"ERROR: Cannot open GPIO chip 0")
-            return False
+        print("[GPIO] ERROR: GPIO chip not initialized")
+        return False
     
-    # Set pin as input with pull-up
     try:
-        lgpio.gpio_claim_input(gpio_chip, pin, lgpio.SET_PULL_UP)
-        print(f"GPIO pin {pin} initialized successfully (input + pull-up)")
+        # Claim pin as input with pull-up resistor
+        # Note: lgpio uses SET_PULL_UP constant
+        result = lgpio.gpio_claim_input(gpio_chip, gpio_num, lgpio.SET_PULL_UP)
+        if result != 0:
+            print(f"[GPIO] ERROR: Failed to claim GPIO {gpio_num}: {result}")
+            return False
+        
         return True
+        
     except Exception as e:
-        print(f"ERROR: Cannot configure GPIO pin {pin}: {e}")
+        print(f"[GPIO] ERROR: Exception initializing GPIO {gpio_num}: {e}")
         return False
 
-def read_gpio_pin(pin: int) -> int:
-    """Read GPIO pin value (0 = low/active, 1 = high/inactive)"""
+
+def read_pin(gpio_num: int) -> int:
+    """
+    Read GPIO pin value.
+    
+    Args:
+        gpio_num: GPIO number to read
+        
+    Returns:
+        0 if pin is low/active (PTT pressed), 1 if high/inactive (PTT released)
+        -1 on error
+    """
     global gpio_chip
     
     if gpio_chip is None:
         return -1
     
     try:
-        value = lgpio.gpio_read(gpio_chip, pin)
-        return value  # 0 = low, 1 = high
-    except Exception:
+        value = lgpio.gpio_read(gpio_chip, gpio_num)
+        # lgpio returns 0 for low, 1 for high (pull-up means active=low=0)
+        return value
+        
+    except Exception as e:
+        print(f"[GPIO] ERROR: Exception reading GPIO {gpio_num}: {e}")
         return -1
 
-def cleanup_gpio(pin: int):
-    """Cleanup GPIO pin (release it)"""
-    global gpio_chip
+
+def register_callback(gpio_num: int, callback: Callable[[int, int], None]):
+    """
+    Register a callback function for GPIO pin state changes.
+    
+    Args:
+        gpio_num: GPIO number to monitor
+        callback: Callback function(gpio_num, new_state) to call on state change
+    """
+    with gpio_mutex:
+        gpio_callbacks[gpio_num] = callback
+        print(f"[GPIO] Registered callback for GPIO {gpio_num}")
+
+
+def unregister_callback(gpio_num: int):
+    """Unregister callback for a GPIO pin."""
+    with gpio_mutex:
+        if gpio_num in gpio_callbacks:
+            del gpio_callbacks[gpio_num]
+            print(f"[GPIO] Unregistered callback for GPIO {gpio_num}")
+
+
+def get_pin_state(gpio_num: int) -> Optional[int]:
+    """
+    Get current state of a GPIO pin (from cache).
+    
+    Args:
+        gpio_num: GPIO number
+        
+    Returns:
+        Current state (0=active, 1=inactive) or None if unknown
+    """
+    with gpio_mutex:
+        return gpio_states.get(gpio_num)
+
+
+def get_gpio_for_channel(channel_index: int) -> Optional[int]:
+    """
+    Get GPIO number for a channel index.
+    
+    Args:
+        channel_index: Channel index (0-3)
+        
+    Returns:
+        GPIO number or None if invalid
+    """
+    gpio_list = list(GPIO_PINS.keys())
+    if 0 <= channel_index < len(gpio_list):
+        return gpio_list[channel_index]
+    return None
+
+
+def get_physical_pin(gpio_num: int) -> Optional[int]:
+    """
+    Get physical pin number for a GPIO number.
+    
+    Args:
+        gpio_num: GPIO number
+        
+    Returns:
+        Physical pin number or None if invalid
+    """
+    return GPIO_PINS.get(gpio_num)
+
+
+# ============================================================================
+# GPIO Monitor Worker Thread
+# ============================================================================
+
+def monitor_gpio(callback: Optional[Callable[[int, int], None]] = None, poll_interval: float = 0.1):
+    """
+    Monitor GPIO pins for state changes (worker thread function).
+    
+    Args:
+        callback: Optional global callback for all pin changes
+        poll_interval: Polling interval in seconds (default: 0.1 = 100ms)
+    """
+    print("[GPIO] GPIO monitor worker started")
     
     if gpio_chip is None:
+        print("[GPIO] ERROR: GPIO chip not initialized, cannot monitor")
         return
-    
-    try:
-        lgpio.gpio_free(gpio_chip, pin)
-    except Exception:
-        pass
-
-def gpio_monitor_worker(arg=None):
-    """GPIO monitor worker thread"""
-    global gpio_38_state, gpio_40_state, gpio_16_state, gpio_18_state
-    
-    gpio_pin_38 = 20   # GPIO 20 (physical pin 38)
-    gpio_pin_40 = 21   # GPIO 21 (physical pin 40)
-    gpio_pin_16 = 23   # GPIO 23 (physical pin 16)
-    gpio_pin_18 = 24   # GPIO 24 (physical pin 18)
-    
-    print("GPIO monitor worker started")
-    
-    # Initialize all pins via lgpio
-    if not (init_gpio_pin(gpio_pin_38) and
-            init_gpio_pin(gpio_pin_40) and
-            init_gpio_pin(gpio_pin_16) and
-            init_gpio_pin(gpio_pin_18)):
-        print("Failed to initialize one or more GPIO pins")
-        return None
-    
-    print("GPIO pins initialized. Reading initial states...")
     
     # Read initial states
     with gpio_mutex:
-        gpio_38_state = read_gpio_pin(gpio_pin_38)
-        gpio_40_state = read_gpio_pin(gpio_pin_40)
-        gpio_16_state = read_gpio_pin(gpio_pin_16)
-        gpio_18_state = read_gpio_pin(gpio_pin_18)
+        for gpio_num in GPIO_PINS.keys():
+            state = read_pin(gpio_num)
+            if state >= 0:
+                gpio_states[gpio_num] = state
+                pin_num = GPIO_PINS[gpio_num]
+                status = "ACTIVE" if state == 0 else "INACTIVE"
+                print(f"[GPIO] PIN {pin_num} (GPIO {gpio_num}) initial state: {status}")
     
-    # Print initial states and set gpio_active for any pins that are already active
-    print(f"PIN 38 initial state: {'ACTIVE' if gpio_38_state == 0 else 'INACTIVE'}")
-    print(f"PIN 40 initial state: {'ACTIVE' if gpio_40_state == 0 else 'INACTIVE'}")
-    print(f"PIN 16 initial state: {'ACTIVE' if gpio_16_state == 0 else 'INACTIVE'}")
-    print(f"PIN 18 initial state: {'ACTIVE' if gpio_18_state == 0 else 'INACTIVE'}")
-    
-    # Import audio module at runtime
-    import audio
-    
-    # Set gpio_active for any pins that are already active at startup
-    if gpio_38_state == 0:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
-                audio.channels[i].audio.gpio_active = 1
-                print(f"Channel {global_channel_ids[0]} audio ENABLED (PIN 38 was already active)")
-                break
-    
-    if gpio_40_state == 0:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[1]:
-                audio.channels[i].audio.gpio_active = 1
-                print(f"Channel {global_channel_ids[1]} audio ENABLED (PIN 40 was already active)")
-                break
-    
-    if gpio_16_state == 0:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[2]:
-                audio.channels[i].audio.gpio_active = 1
-                print(f"Channel {global_channel_ids[2]} audio ENABLED (PIN 16 was already active)")
-                break
-    
-    if gpio_18_state == 0 and global_channel_count > 3:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
-                audio.channels[i].audio.gpio_active = 1
-                print(f"Channel {global_channel_ids[3]} audio ENABLED (PIN 18 was already active)")
-                break
-    
-    print("Monitoring GPIO pins for changes...")
-    print("GPIO Status will be displayed every 10 seconds")
-    
-    # Re-sync GPIO state after channels are set up (in case channels weren't active during initial check)
-    # Wait a bit for channels to be set up, then re-check
-    import time
-    time.sleep(2)  # Give channels time to be set up
-    
-    # Re-sync GPIO state now that channels should be active
-    print("[GPIO] Re-syncing GPIO state with channels...")
-    # Import websocket here to avoid circular import at module level
-    import websocket
-    
-    if gpio_38_state == 0:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
-                if not audio.channels[i].audio.gpio_active:
-                    audio.channels[i].audio.gpio_active = 1
-                    print(f"[GPIO] Channel {global_channel_ids[0]} audio ENABLED (re-sync: PIN 38 is active)")
-                    # Send transmit_started to server - server only sends audio when client is transmitting
-                    websocket.send_websocket_transmit_event(global_channel_ids[0], 1)
-                break
-    
-    if gpio_40_state == 0:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[1]:
-                if not audio.channels[i].audio.gpio_active:
-                    audio.channels[i].audio.gpio_active = 1
-                    print(f"[GPIO] Channel {global_channel_ids[1]} audio ENABLED (re-sync: PIN 40 is active)")
-                    # Send transmit_started to server
-                    websocket.send_websocket_transmit_event(global_channel_ids[1], 1)
-                break
-    
-    if gpio_16_state == 0:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[2]:
-                if not audio.channels[i].audio.gpio_active:
-                    audio.channels[i].audio.gpio_active = 1
-                    print(f"[GPIO] Channel {global_channel_ids[2]} audio ENABLED (re-sync: PIN 16 is active)")
-                    # Send transmit_started to server
-                    websocket.send_websocket_transmit_event(global_channel_ids[2], 1)
-                break
-    
-    if gpio_18_state == 0 and global_channel_count > 3:
-        for i in range(4):
-            if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
-                if not audio.channels[i].audio.gpio_active:
-                    audio.channels[i].audio.gpio_active = 1
-                    print(f"[GPIO] Channel {global_channel_ids[3]} audio ENABLED (re-sync: PIN 18 is active)")
-                    # Send transmit_started to server
-                    websocket.send_websocket_transmit_event(global_channel_ids[3], 1)
-                break
+    print("[GPIO] Monitoring GPIO pins for changes...")
     
     status_counter = 0
-    mqtt_keepalive_counter = 0
     
     while not global_interrupted.is_set():
-        curr_val_38 = read_gpio_pin(gpio_pin_38)
-        curr_val_40 = read_gpio_pin(gpio_pin_40)
-        curr_val_16 = read_gpio_pin(gpio_pin_16)
-        curr_val_18 = read_gpio_pin(gpio_pin_18)
-        
-        # Keep MQTT connection alive - call every 1 second (10 iterations * 100ms)
-        mqtt_keepalive_counter += 1
-        if mqtt_keepalive_counter >= 10:
-            import mqtt
-            mqtt.mqtt_keepalive()
-            mqtt_keepalive_counter = 0
-        
-        with gpio_mutex:
-            # Check for changes and send WebSocket events
-            if curr_val_38 != gpio_38_state and curr_val_38 != -1:
-                gpio_38_state = curr_val_38
-                print(f"PIN 38: {'ACTIVE' if curr_val_38 == 0 else 'INACTIVE'}")
-                
-                # Find and set gpio_active flag for the correct audio stream
-                for i in range(4):
-                    if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
-                        audio.channels[i].audio.gpio_active = 1 if curr_val_38 == 0 else 0
-                        print(f"Channel {global_channel_ids[0]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                        
-                        # If GPIO becomes active and UDP is ready, start transmission if not already started
-                        if curr_val_38 == 0:  # GPIO is active
-                            import udp
-                            if udp.global_udp_socket and udp.global_server_addr:
-                                if not audio.channels[i].audio.transmitting:
-                                    print(f"[GPIO] Starting transmission for channel {global_channel_ids[0]} (GPIO active, UDP ready)")
-                                    # Check if key is already set
-                                    if any(audio.channels[i].audio.key):
-                                        if audio.start_transmission_for_channel(audio.channels[i].audio):
-                                            print(f"[GPIO] Transmission started for channel {global_channel_ids[0]}")
-                                        else:
-                                            print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[0]}")
-                        break
-                
-                import websocket
-                websocket.send_websocket_transmit_event(global_channel_ids[0], 1 if curr_val_38 == 0 else 0)
-            
-            if curr_val_40 != gpio_40_state and curr_val_40 != -1:
-                gpio_40_state = curr_val_40
-                print(f"PIN 40: {'ACTIVE' if curr_val_40 == 0 else 'INACTIVE'}")
-                
-                for i in range(4):
-                    if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[1]:
-                        audio.channels[i].audio.gpio_active = 1 if curr_val_40 == 0 else 0
-                        print(f"Channel {global_channel_ids[1]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                        
-                        # If GPIO becomes active and UDP is ready, start transmission if not already started
-                        if curr_val_40 == 0:  # GPIO is active
-                            import udp
-                            if udp.global_udp_socket and udp.global_server_addr:
-                                if not audio.channels[i].audio.transmitting:
-                                    print(f"[GPIO] Starting transmission for channel {global_channel_ids[1]} (GPIO active, UDP ready)")
-                                    # Check if key is already set
-                                    if any(audio.channels[i].audio.key):
-                                        if audio.start_transmission_for_channel(audio.channels[i].audio):
-                                            print(f"[GPIO] Transmission started for channel {global_channel_ids[1]}")
-                                        else:
-                                            print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[1]}")
-                        break
-                
-                import websocket
-                websocket.send_websocket_transmit_event(global_channel_ids[1], 1 if curr_val_40 == 0 else 0)
-            
-            if curr_val_16 != gpio_16_state and curr_val_16 != -1:
-                gpio_16_state = curr_val_16
-                print(f"PIN 16: {'ACTIVE' if curr_val_16 == 0 else 'INACTIVE'}")
-                
-                for i in range(4):
-                    if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[2]:
-                        audio.channels[i].audio.gpio_active = 1 if curr_val_16 == 0 else 0
-                        print(f"Channel {global_channel_ids[2]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                        
-                        # If GPIO becomes active and UDP is ready, start transmission if not already started
-                        if curr_val_16 == 0:  # GPIO is active
-                            import udp
-                            if udp.global_udp_socket and udp.global_server_addr:
-                                if not audio.channels[i].audio.transmitting:
-                                    print(f"[GPIO] Starting transmission for channel {global_channel_ids[2]} (GPIO active, UDP ready)")
-                                    # Check if key is already set
-                                    if any(audio.channels[i].audio.key):
-                                        if audio.start_transmission_for_channel(audio.channels[i].audio):
-                                            print(f"[GPIO] Transmission started for channel {global_channel_ids[2]}")
-                                        else:
-                                            print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[2]}")
-                        break
-                
-                import websocket
-                websocket.send_websocket_transmit_event(global_channel_ids[2], 1 if curr_val_16 == 0 else 0)
-            
-            if curr_val_18 != gpio_18_state and curr_val_18 != -1:
-                gpio_18_state = curr_val_18
-                print(f"PIN 18: {'ACTIVE' if curr_val_18 == 0 else 'INACTIVE'}")
-                
-                # Only process if channel 3 exists
-                if global_channel_count > 3:
-                    for i in range(4):
-                        if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
-                            audio.channels[i].audio.gpio_active = 1 if curr_val_18 == 0 else 0
-                            print(f"Channel {global_channel_ids[3]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
-                            
-                            # If GPIO becomes active and UDP is ready, start transmission if not already started
-                            if curr_val_18 == 0:  # GPIO is active
-                                import udp
-                                if udp.global_udp_socket and udp.global_server_addr:
-                                    if not audio.channels[i].audio.transmitting:
-                                        print(f"[GPIO] Starting transmission for channel {global_channel_ids[3]} (GPIO active, UDP ready)")
-                                        # Check if key is already set
-                                        if any(audio.channels[i].audio.key):
-                                            if audio.start_transmission_for_channel(audio.channels[i].audio):
-                                                print(f"[GPIO] Transmission started for channel {global_channel_ids[3]}")
-                                            else:
-                                                print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[3]}")
-                            break
+        try:
+            with gpio_mutex:
+                # Check each GPIO pin for state changes
+                for gpio_num in GPIO_PINS.keys():
+                    current_state = read_pin(gpio_num)
+                    if current_state < 0:
+                        continue  # Skip on error
                     
-                    import websocket
-                    websocket.send_websocket_transmit_event(global_channel_ids[3], 1 if curr_val_18 == 0 else 0)
+                    previous_state = gpio_states.get(gpio_num)
+                    
+                    if previous_state is None or current_state != previous_state:
+                        # State changed
+                        gpio_states[gpio_num] = current_state
+                        pin_num = GPIO_PINS[gpio_num]
+                        status = "ACTIVE" if current_state == 0 else "INACTIVE"
+                        print(f"[GPIO] PIN {pin_num} (GPIO {gpio_num}): {status}")
+                        
+                        # Call registered callback if exists
+                        if gpio_num in gpio_callbacks:
+                            try:
+                                gpio_callbacks[gpio_num](gpio_num, current_state)
+                            except Exception as e:
+                                print(f"[GPIO] ERROR: Exception in callback for GPIO {gpio_num}: {e}")
+                        
+                        # Call global callback if provided
+                        if callback:
+                            try:
+                                callback(gpio_num, current_state)
+                            except Exception as e:
+                                print(f"[GPIO] ERROR: Exception in global callback: {e}")
             
-            # Display status every 10 seconds (30 iterations * 100ms = 3 seconds, adjust to 100 for 10 seconds)
+            # Display status periodically
             status_counter += 1
-            if status_counter >= 100:
-                print("\n=== GPIO Status Report (every 10 seconds) ===")
-                print(f"PIN 38 (GPIO 20): {'ACTIVE' if curr_val_38 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[0]})")
-                print(f"PIN 40 (GPIO 21): {'ACTIVE' if curr_val_40 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[1]})")
-                print(f"PIN 16 (GPIO 23): {'ACTIVE' if curr_val_16 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[2]})")
-                if global_channel_count > 3:
-                    print(f"PIN 18 (GPIO 24): {'ACTIVE' if curr_val_18 == 0 else 'INACTIVE'} (Channel: {global_channel_ids[3]})")
-                else:
-                    print(f"PIN 18 (GPIO 24): {'ACTIVE' if curr_val_18 == 0 else 'INACTIVE'} (Channel: N/A)")
-                
-                # Add recording status
-                import tone_detect
-                if tone_detect.global_tone_detection.recording_active:
-                    remaining = tone_detect.get_recording_time_remaining_ms()
-                    print(f"🎙️  RECORDING: Active ({remaining} ms remaining)")
-                else:
-                    print("🎙️  RECORDING: Inactive")
-                print("==========================================\n")
+            if status_counter >= 100:  # Every 10 seconds (100 * 0.1s)
+                print("\n=== GPIO Status Report ===")
+                with gpio_mutex:
+                    for gpio_num, pin_num in GPIO_PINS.items():
+                        state = gpio_states.get(gpio_num, -1)
+                        status = "ACTIVE" if state == 0 else ("INACTIVE" if state == 1 else "UNKNOWN")
+                        print(f"PIN {pin_num} (GPIO {gpio_num}): {status}")
+                print("=" * 30 + "\n")
                 status_counter = 0
-        
-        time.sleep(0.1)  # 100 ms poll
+            
+            time.sleep(poll_interval)
+            
+        except Exception as e:
+            if not global_interrupted.is_set():
+                print(f"[GPIO] ERROR: Exception in monitor loop: {e}")
+            time.sleep(poll_interval)
     
-    print("GPIO monitor worker stopped")
-    return None
+    print("[GPIO] GPIO monitor worker stopped")
 
+
+def cleanup_gpio():
+    """Release GPIO resources and cleanup."""
+    global gpio_chip, gpio_states, gpio_callbacks
+    
+    with gpio_mutex:
+        if gpio_chip is not None:
+            try:
+                # Free all GPIO pins
+                for gpio_num in GPIO_PINS.keys():
+                    try:
+                        lgpio.gpio_free(gpio_chip, gpio_num)
+                    except Exception as e:
+                        print(f"[GPIO] WARNING: Failed to free GPIO {gpio_num}: {e}")
+                
+                # Close GPIO chip
+                lgpio.gpiochip_close(gpio_chip)
+                print("[GPIO] GPIO chip closed")
+                
+            except Exception as e:
+                print(f"[GPIO] ERROR: Exception during GPIO cleanup: {e}")
+            
+            gpio_chip = None
+        
+        gpio_states.clear()
+        gpio_callbacks.clear()
