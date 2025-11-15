@@ -228,7 +228,13 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
     try:
         # Receive packet (blocking, like C code's recvfrom)
         # Match C code: recvfrom blocks until data arrives
+        # This will block indefinitely until a packet arrives
         data, addr = global_udp_socket.recvfrom(8192)
+        
+        # Log that we received something (first time only)
+        if not hasattr(receive_audio_packet, '_first_receive_logged'):
+            print(f"[UDP] ✅ Socket is receiving data! Got {len(data)} bytes from {addr[0]}:{addr[1]}")
+            receive_audio_packet._first_receive_logged = True
         
         if len(data) == 0:
             return None
@@ -401,8 +407,18 @@ def udp_listener_worker():
     
     print(f"[UDP] Listening on UDP socket {global_udp_socket.fileno()}...")
     
+    # Verify socket state
+    try:
+        sockname = global_udp_socket.getsockname()
+        print(f"[UDP] Socket is bound to {sockname[0]}:{sockname[1]}")
+        print(f"[UDP] Socket blocking mode: {not global_udp_socket.gettimeout()}")  # None = blocking
+        print(f"[UDP] Ready to receive packets from server...")
+    except Exception as e:
+        print(f"[UDP] WARNING: Could not get socket info: {e}")
+    
     packet_count = 0
     last_log_time = time.time()
+    first_recv_attempt = True
     
     while not global_interrupted.is_set():
         if global_udp_socket is None:
@@ -410,6 +426,11 @@ def udp_listener_worker():
             continue
         
         try:
+            # Log first recvfrom attempt (this will block until packet arrives)
+            if first_recv_attempt:
+                print(f"[UDP] Blocking on recvfrom() - waiting for first packet from server...")
+                first_recv_attempt = False
+            
             # Match C code: blocking recvfrom() - waits for data
             # This is the key difference - C code uses blocking recvfrom, not select
             result = receive_audio_packet()
