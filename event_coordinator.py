@@ -163,18 +163,69 @@ def handle_udp_ready(udp_config: Dict[str, Any]):
                 
                 # Setup UDP packet receive callback
                 def handle_udp_packet(channel_id: str, encrypted_data: bytes):
-                    """Handle received UDP packet."""
+                    """
+                    Handle received UDP packet.
+                    Matches C code: decrypt, decode Opus, write to jitter buffer.
+                    """
                     try:
                         import audio_workers
+                        import audio_stream
+                        
+                        # Find channel (match C code's channel lookup)
                         ctx = channel_manager.get_channel(channel_id)
-                        if ctx and ctx.audio:
-                            # Decrypt packet
-                            decrypted = crypto.decrypt_aes(encrypted_data, ctx.audio.encryption_key)
-                            if decrypted:
-                                # Write Opus data to jitter buffer
-                                audio_workers.write_to_jitter_buffer(ctx.audio, decrypted)
+                        if not ctx or not ctx.audio:
+                            # Channel not found (log first few times only)
+                            static_channel_not_found = getattr(handle_udp_packet, '_channel_not_found', set())
+                            if channel_id not in static_channel_not_found:
+                                static_channel_not_found.add(channel_id)
+                                handle_udp_packet._channel_not_found = static_channel_not_found
+                                print(f"[EVENT] WARNING: No active channel found for '{channel_id}'")
+                                all_channels = channel_manager.get_all_channels()
+                                if all_channels:
+                                    print(f"[EVENT] Active channels: {', '.join(all_channels)}")
+                            return
+                        
+                        # Check if encryption key is set (match C code's zero_key check)
+                        key_is_zero = all(b == 0 for b in ctx.audio.encryption_key)
+                        if key_is_zero:
+                            static_zero_key_warned = getattr(handle_udp_packet, '_zero_key_warned', set())
+                            if channel_id not in static_zero_key_warned:
+                                static_zero_key_warned.add(channel_id)
+                                handle_udp_packet._zero_key_warned = static_zero_key_warned
+                                print(f"[EVENT] WARNING: AES key not set for channel {channel_id}; dropping encrypted audio until key is provisioned")
+                            return
+                        
+                        # Decrypt packet (match C code's decrypt_data)
+                        decrypted = crypto.decrypt_aes(encrypted_data, ctx.audio.encryption_key)
+                        if not decrypted:
+                            static_decrypt_failures = getattr(handle_udp_packet, '_decrypt_failures', {})
+                            count = static_decrypt_failures.get(channel_id, 0) + 1
+                            static_decrypt_failures[channel_id] = count
+                            handle_udp_packet._decrypt_failures = static_decrypt_failures
+                            
+                            if count <= 3 or count % 50 == 0:
+                                print(f"[EVENT] WARNING: Decryption failed for channel {channel_id} (failure #{count})")
+                            return
+                        
+                        # Write Opus data to jitter buffer (match C code's jitter buffer write)
+                        # Note: In C code, it also decodes Opus and converts to float32,
+                        # but here we write the Opus data directly and let output worker decode
+                        success = audio_workers.write_to_jitter_buffer(ctx.audio, decrypted)
+                        
+                        if not success:
+                            # Buffer full (should rarely happen, but log if it does)
+                            static_buffer_full = getattr(handle_udp_packet, '_buffer_full', {})
+                            count = static_buffer_full.get(channel_id, 0) + 1
+                            static_buffer_full[channel_id] = count
+                            handle_udp_packet._buffer_full = static_buffer_full
+                            
+                            if count <= 3 or count % 100 == 0:
+                                print(f"[EVENT] WARNING: Jitter buffer full for channel {channel_id} (drops: {count})")
+                        
                     except Exception as e:
-                        print(f"[EVENT] ERROR: Exception handling UDP packet: {e}")
+                        print(f"[EVENT] ERROR: Exception handling UDP packet for channel {channel_id}: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 udp_manager.set_packet_receive_callback(handle_udp_packet)
                 

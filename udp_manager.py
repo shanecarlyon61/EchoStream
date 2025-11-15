@@ -5,7 +5,6 @@ This module handles UDP socket management, audio packet sending/receiving,
 heartbeat mechanism, and packet encryption/decryption.
 """
 import socket
-import select
 import threading
 import time
 import json
@@ -45,11 +44,12 @@ heartbeat_interval = 5.0  # seconds
 def setup_udp(host: str, port: int, bind_port: int = 0) -> bool:
     """
     Create and configure UDP socket.
+    Matches C implementation: blocking socket, bound after first send.
     
     Args:
         host: Server hostname or IP address
         port: Server UDP port
-        bind_port: Local port to bind to (0 = auto-assign)
+        bind_port: Local port to bind to (0 = auto-assign, like C code)
         
     Returns:
         True if setup successful, False otherwise
@@ -61,27 +61,29 @@ def setup_udp(host: str, port: int, bind_port: int = 0) -> bool:
         return True
     
     try:
-        # Create UDP socket
+        # Create UDP socket (blocking by default, like C code)
         global_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         global_udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Set socket to non-blocking for use with select
-        global_udp_socket.setblocking(False)
-        
-        # Bind to local port
-        global_udp_socket.bind(('0.0.0.0', bind_port))
-        
-        # Get local address
-        local_addr = global_udp_socket.getsockname()
-        print(f"[UDP] Socket bound to: {local_addr[0]}:{local_addr[1]}")
-        
-        # Set server address
+        # Set server address first (before bind, like C code)
         global_server_addr = (host, port)
         print(f"[UDP] Server address: {global_server_addr}")
         
-        # Send initial heartbeat immediately
+        # Send initial heartbeat immediately (this will auto-bind the socket to a local port)
+        # In C code, the socket gets bound when first sendto is called
         send_heartbeat()
         print("[UDP] Initial heartbeat sent")
+        
+        # Now get local address (after first send, like C code)
+        try:
+            local_addr = global_udp_socket.getsockname()
+            print(f"[UDP] Socket bound to: {local_addr[0]}:{local_addr[1]}")
+        except Exception as e:
+            print(f"[UDP] Could not get local socket info: {e}")
+        
+        # Note: In C code, socket is not explicitly bound before recvfrom
+        # The socket is created, first sendto binds it, then recvfrom works
+        # Python's behavior is similar - socket is implicitly bound on first send
         
         print(f"[UDP] UDP socket configured for {host}:{port}")
         return True
@@ -213,7 +215,7 @@ def decrypt_packet(encrypted_data: bytes, key: bytes) -> Optional[bytes]:
 
 def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
     """
-    Receive audio packet from UDP socket (non-blocking).
+    Receive audio packet from UDP socket (blocking, like C code).
     
     Returns:
         Tuple of (channel_id, encrypted_data) or None if no packet received
@@ -224,47 +226,66 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
         return None
     
     try:
-        # Receive packet (non-blocking due to setblocking(False))
+        # Receive packet (blocking, like C code's recvfrom)
+        # Match C code: recvfrom blocks until data arrives
         data, addr = global_udp_socket.recvfrom(8192)
         
-        # Parse JSON message
+        if len(data) == 0:
+            return None
+        
+        # Parse JSON message (match C code's json_tokener_parse)
         try:
             message = json.loads(data.decode('utf-8'))
         except json.JSONDecodeError as e:
-            # Log first few decode errors for debugging
+            # Log decode errors (first few only)
             static_decode_errors = getattr(receive_audio_packet, '_decode_errors', 0)
             receive_audio_packet._decode_errors = static_decode_errors + 1
             if static_decode_errors < 3:
                 print(f"[UDP] ERROR: Failed to parse received packet as JSON (error #{static_decode_errors + 1}): {e}")
-                print(f"[UDP] DEBUG: Received {len(data)} bytes from {addr}")
-                if len(data) < 100:
-                    print(f"[UDP] DEBUG: First 50 bytes: {data[:50]}")
+                print(f"[UDP] DEBUG: Received {len(data)} bytes from {addr[0]}:{addr[1]}")
+                if len(data) < 200:
+                    print(f"[UDP] DEBUG: Data preview: {data[:100]}")
             return None
         
-        # Extract channel ID and data
+        # Extract channel ID and data (match C code's json_object_object_get_ex)
         channel_id = message.get('channel_id', '')
+        message_type = message.get('type', '')
         b64_data = message.get('data', '')
+        
+        # Match C code: check for "audio" type
+        if message_type != 'audio':
+            # Not an audio packet, skip (match C code behavior)
+            return None
         
         if not channel_id or not b64_data:
             return None
         
-        # Decode base64
+        # Decode base64 (match C code's decode_base64_len)
         encrypted_data = crypto.decode_base64(b64_data)
-        if encrypted_data is None:
-            print(f"[UDP] ERROR: Failed to decode base64 for channel {channel_id}")
+        if encrypted_data is None or len(encrypted_data) == 0:
+            static_decode_failures = getattr(receive_audio_packet, '_base64_failures', 0)
+            receive_audio_packet._base64_failures = static_decode_failures + 1
+            if static_decode_failures < 3:
+                print(f"[UDP] ERROR: Failed to decode base64 for channel {channel_id} (error #{static_decode_failures + 1})")
             return None
         
-        # Return channel ID and encrypted data (decryption happens elsewhere with correct key)
+        # Return channel ID and encrypted data (decryption happens in callback, like C code)
         return channel_id, encrypted_data
         
+    except socket.timeout:
+        # Timeout should not happen with blocking socket, but handle it anyway
+        return None
     except socket.error as e:
-        # Non-blocking socket will raise socket.error (errno.EAGAIN) when no data available
-        if e.errno != 11:  # EAGAIN = 11 on Linux (resource temporarily unavailable)
-            if not global_interrupted.is_set():
-                static_errors = getattr(receive_audio_packet, '_socket_errors', 0)
-                receive_audio_packet._socket_errors = static_errors + 1
-                if static_errors < 3:
-                    print(f"[UDP] ERROR: Socket error receiving packet (error #{static_errors + 1}): {e}")
+        # Check for EAGAIN/EWOULDBLOCK (shouldn't happen with blocking socket, but check)
+        if hasattr(e, 'errno') and e.errno in (11, 10035):  # EAGAIN on Linux, EWOULDBLOCK on Windows
+            return None
+        if not global_interrupted.is_set():
+            static_errors = getattr(receive_audio_packet, '_socket_errors', 0)
+            receive_audio_packet._socket_errors = static_errors + 1
+            if static_errors < 3:
+                print(f"[UDP] ERROR: Socket error receiving packet (error #{static_errors + 1}): {e}")
+                import traceback
+                traceback.print_exc()
         return None
     except Exception as e:
         if not global_interrupted.is_set():
@@ -272,6 +293,8 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
             receive_audio_packet._general_errors = static_errors + 1
             if static_errors < 3:
                 print(f"[UDP] ERROR: Exception receiving packet (error #{static_errors + 1}): {e}")
+                import traceback
+                traceback.print_exc()
         return None
 
 
@@ -293,6 +316,7 @@ def set_packet_receive_callback(callback: Callable[[str, bytes], None]):
 def send_heartbeat() -> bool:
     """
     Send heartbeat packet to server.
+    Matches C code: simple sendto (blocking socket).
     
     Returns:
         True if heartbeat sent successfully, False otherwise
@@ -303,19 +327,20 @@ def send_heartbeat() -> bool:
         return False
     
     try:
-        heartbeat_msg = json.dumps({
-            "type": "heartbeat",
-            "timestamp": int(time.time())
-        })
+        # Match C code: simple heartbeat message
+        heartbeat_msg = '{"type":"KEEP_ALIVE"}'
         
-        # Use sendto (socket is non-blocking but sendto should work)
-        global_udp_socket.sendto(heartbeat_msg.encode('utf-8'), global_server_addr)
-        return True
+        # Use sendto (blocking socket, like C code)
+        result = global_udp_socket.sendto(heartbeat_msg.encode('utf-8'), global_server_addr)
+        
+        if result >= 0:
+            return True
+        else:
+            print(f"[UDP] ERROR: Failed to send heartbeat (result={result})")
+            return False
         
     except socket.error as e:
-        # Non-blocking socket might raise error on send if buffer is full
-        if e.errno != 11:  # EAGAIN
-            print(f"[UDP] ERROR: Failed to send heartbeat: {e}")
+        print(f"[UDP] ERROR: Failed to send heartbeat: {e}")
         return False
     except Exception as e:
         print(f"[UDP] ERROR: Failed to send heartbeat: {e}")
@@ -362,13 +387,21 @@ def stop_heartbeat():
 # ============================================================================
 
 def udp_listener_worker():
-    """UDP listener worker thread - receives audio packets."""
+    """
+    UDP listener worker thread - receives audio packets.
+    Matches C code: uses blocking recvfrom() in a loop.
+    """
     global global_udp_socket, packet_receive_callback
     
     print("[UDP] UDP listener worker started")
     
+    if global_udp_socket is None:
+        print("[UDP] ERROR: UDP socket not initialized")
+        return
+    
+    print(f"[UDP] Listening on UDP socket {global_udp_socket.fileno()}...")
+    
     packet_count = 0
-    timeout_count = 0
     last_log_time = time.time()
     
     while not global_interrupted.is_set():
@@ -377,91 +410,56 @@ def udp_listener_worker():
             continue
         
         try:
-            # Check if socket is ready for reading (use select with 0.1s timeout)
-            ready, _, _ = select.select([global_udp_socket], [], [], 0.1)
+            # Match C code: blocking recvfrom() - waits for data
+            # This is the key difference - C code uses blocking recvfrom, not select
+            result = receive_audio_packet()
             
-            if ready:
-                # Socket is ready, try to receive packet(s)
-                # Receive multiple packets if available
-                packets_received = 0
-                first_channel_id = None
-                while True:
-                    result = receive_audio_packet()
-                    
-                    if result:
-                        channel_id, encrypted_data = result
-                        packet_count += 1
-                        packets_received += 1
-                        
-                        # Store first channel ID for logging
-                        if first_channel_id is None:
-                            first_channel_id = channel_id
-                        
-                        # Call callback if registered
-                        if packet_receive_callback:
-                            try:
-                                packet_receive_callback(channel_id, encrypted_data)
-                            except Exception as e:
-                                print(f"[UDP] ERROR: Exception in packet receive callback: {e}")
-                                import traceback
-                                traceback.print_exc()
-                        else:
-                            # Log warning if callback not set
-                            static_callback_warn = getattr(udp_listener_worker, '_callback_warned', False)
-                            if not static_callback_warn:
-                                print("[UDP] WARNING: Packet received but callback not set!")
-                                udp_listener_worker._callback_warned = True
-                    else:
-                        # No more packets available
-                        break
+            if result:
+                channel_id, encrypted_data = result
+                packet_count += 1
                 
-                # Log when packets are received
-                if packets_received > 0:
-                    # Reset timeout counter
-                    timeout_count = 0
-                    
-                    # Log first packet and periodically
-                    if packet_count == 1:
-                        if first_channel_id:
-                            print(f"[UDP] ✅ First packet received! (channel: {first_channel_id})")
-                        else:
-                            print(f"[UDP] ✅ First packet received!")
-                    elif packet_count % 500 == 0:  # Every ~10 seconds at 50 packets/sec
-                        print(f"[UDP] Received {packet_count} packets total")
+                # Log first packet
+                if packet_count == 1:
+                    print(f"[UDP] ✅ First packet received! (channel: {channel_id}, {len(encrypted_data)} bytes encrypted)")
+                
+                # Log periodically
+                if packet_count % 1000 == 0:  # Every ~20 seconds at 50 packets/sec
+                    print(f"[UDP] Received {packet_count} packets total")
+                
+                # Call callback if registered (match C code's packet processing)
+                if packet_receive_callback:
+                    try:
+                        packet_receive_callback(channel_id, encrypted_data)
+                    except Exception as e:
+                        print(f"[UDP] ERROR: Exception in packet receive callback: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    # Log warning if callback not set (shouldn't happen)
+                    static_callback_warn = getattr(udp_listener_worker, '_callback_warned', False)
+                    if not static_callback_warn:
+                        print("[UDP] WARNING: Packet received but callback not set!")
+                        udp_listener_worker._callback_warned = True
             else:
-                # No data available
-                timeout_count += 1
+                # receive_audio_packet returned None (shouldn't happen with blocking socket unless error)
+                # But handle it gracefully anyway
+                pass
                 
-                # Log periodically (every 10 seconds)
-                current_time = time.time()
-                if current_time - last_log_time >= 10.0:
-                    last_log_time = current_time
-                    if packet_count == 0:
-                        print(f"[UDP] Still waiting for packets (elapsed: {timeout_count * 0.1:.1f}s)")
-                        if timeout_count >= 100:  # 10 seconds
-                            print("[UDP] DEBUG: Checking UDP socket state...")
-                            if global_udp_socket:
-                                try:
-                                    sockname = global_udp_socket.getsockname()
-                                    print(f"[UDP] DEBUG: Socket bound to {sockname}")
-                                    print(f"[UDP] DEBUG: Server address: {global_server_addr}")
-                                    print(f"[UDP] DEBUG: Callback registered: {packet_receive_callback is not None}")
-                                except Exception as e:
-                                    print(f"[UDP] DEBUG: Error checking socket: {e}")
-                    else:
-                        # We've received packets before, just log that we're waiting
-                        if timeout_count % 100 == 0:  # Every 10 seconds
-                            print(f"[UDP] Waiting for more packets (received {packet_count} so far)")
-                
+        except KeyboardInterrupt:
+            # Allow graceful shutdown
+            break
         except Exception as e:
             if not global_interrupted.is_set():
                 static_errors = getattr(udp_listener_worker, '_loop_errors', 0)
                 udp_listener_worker._loop_errors = static_errors + 1
-                if static_errors < 5:
+                if static_errors < 10:  # Log first 10 errors for debugging
                     print(f"[UDP] ERROR: Exception in UDP listener (error #{static_errors + 1}): {e}")
                     import traceback
                     traceback.print_exc()
-            time.sleep(0.1)
+                # Continue loop to keep listening
+            else:
+                # Interrupted, break out
+                break
     
     print(f"[UDP] UDP listener worker stopped (received {packet_count} packets total)")
 
