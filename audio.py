@@ -385,14 +385,9 @@ def audio_output_worker(audio_stream: AudioStream):
     buffer_wait_count = 0
     
     # Buffer size: At 48kHz, 1024 samples take ~21.3ms to play
-    # We need to rate-limit to prevent consuming frames faster than they arrive
+    # PyAudio's blocking write() should naturally rate-limit to match hardware playback rate
     FRAMES_PER_BUFFER = 1024
-    SAMPLE_RATE = 48000  # Explicitly set to match echostream.py
-    TIME_PER_BUFFER = FRAMES_PER_BUFFER / SAMPLE_RATE  # ~0.0213 seconds per buffer
-    
-    # Rate limiting: track last write time to ensure we don't write too fast
     import time
-    last_write_time = time.time()
     write_count = 0
     
     while not global_interrupted.is_set() and audio_stream.transmitting:
@@ -563,7 +558,6 @@ def audio_output_worker(audio_stream: AudioStream):
                 # Write to output stream (this should block if buffer is full)
                 try:
                     audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
-                    last_write_time = time.time()
                     write_count += 1
                 except Exception as e:
                     print(f"[AUDIO ERROR] Channel {audio_stream.channel_id}: Write error: {e}")
