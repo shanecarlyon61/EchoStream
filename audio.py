@@ -392,11 +392,6 @@ def audio_output_worker(audio_stream: AudioStream):
     output_count = 0
     silence_count = 0
     
-    # Minimum buffer threshold - wait until we have at least 2 frames before starting playback
-    # This prevents choppy audio from buffer underruns
-    MIN_BUFFER_THRESHOLD = 2
-    buffer_wait_count = 0
-    
     # Buffer size: At 48kHz, 1024 samples take ~21.3ms to play
     # Match C implementation: PyAudio's blocking write() naturally rate-limits
     # No manual rate limiting needed - PyAudio blocks when its buffer is full
@@ -601,16 +596,35 @@ def audio_output_worker(audio_stream: AudioStream):
                 
                 audio_bytes = samples_to_play.astype(np.float32).tobytes()
                 
-                # Write to output stream - PyAudio's blocking write() naturally rate-limits
-                # Match C implementation: hardware callback is called when needed (automatic timing)
-                # PyAudio's blocking write() will block when its internal buffer is full,
-                # naturally matching the hardware playback rate - no manual rate limiting needed
-                # The C implementation doesn't have any rate limiting - hardware controls timing
+                # Match C implementation: Hardware callback is called when needed (automatic timing)
+                # In Python, we must manually rate-limit to match hardware playback rate
+                # At 48kHz, 1024 samples = 21.33ms per buffer
+                # We need to ensure we don't write faster than hardware can play
+                TIME_PER_BUFFER = FRAMES_PER_BUFFER / SAMPLE_RATE  # ~0.0213 seconds (21.33ms)
+                
+                # Track write timing to ensure we don't exceed hardware playback rate
+                if not hasattr(audio_output_worker, '_last_write_time'):
+                    audio_output_worker._last_write_time = {}
+                if audio_stream.channel_id not in audio_output_worker._last_write_time:
+                    audio_output_worker._last_write_time[audio_stream.channel_id] = time.time()
+                
+                current_time = time.time()
+                elapsed = current_time - audio_output_worker._last_write_time[audio_stream.channel_id]
+                
+                # If we're writing too fast, wait to match hardware playback rate
+                # This ensures we don't consume frames faster than hardware can play them
+                if elapsed < TIME_PER_BUFFER:
+                    sleep_time = TIME_PER_BUFFER - elapsed
+                    if sleep_time > 0.001:  # Only sleep if significant (>1ms)
+                        time.sleep(sleep_time)
+                        current_time = time.time()  # Update time after sleep
+                
                 try:
-                    # PyAudio's write() will block if its internal buffer is full,
-                    # naturally matching hardware playback rate (like C's callback timing)
+                    # PyAudio's write() may not block if its internal buffer has space,
+                    # so we manually rate-limit to match hardware playback rate
                     audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
                     write_count += 1
+                    audio_output_worker._last_write_time[audio_stream.channel_id] = current_time
                 except Exception as e:
                     print(f"[AUDIO ERROR] Channel {audio_stream.channel_id}: Write error: {e}")
                     time.sleep(0.01)  # Small delay on error
