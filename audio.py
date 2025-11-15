@@ -613,10 +613,37 @@ def audio_output_worker(audio_stream: AudioStream):
                 current_time = time.time()
                 elapsed = current_time - last_write_time
                 
+                # Check jitter buffer level - if buffer is getting low, slow down consumption
+                with audio_stream.output_jitter.mutex:
+                    jitter_frames = audio_stream.output_jitter.frame_count
+                
+                # Adaptive rate limiting: if buffer is low, wait longer to allow it to fill
+                # This prevents consuming frames faster than they arrive
+                # Match C behavior: hardware callback is called when needed (automatic timing)
+                # In Python, we must manually rate-limit to prevent consuming too fast
+                if jitter_frames < 3:
+                    # Buffer is low - wait longer to allow packets to arrive
+                    # At 48kHz, we need ~50 packets/second (one per 20ms)
+                    # Wait longer to ensure buffer can refill before consuming more
+                    adaptive_wait = TIME_PER_BUFFER * 2.0  # Wait 2x normal rate when buffer is low
+                    
+                    # Log when we slow down due to low buffer
+                    if output_count % 100 == 0:
+                        print(f"[RATE LIMIT] Channel {audio_stream.channel_id}: Buffer low (frames={jitter_frames}), "
+                              f"slowing consumption (wait={adaptive_wait*1000:.1f}ms)")
+                elif jitter_frames < 5:
+                    # Buffer is getting low - wait slightly longer
+                    adaptive_wait = TIME_PER_BUFFER * 1.5
+                else:
+                    # Buffer is healthy - use normal rate
+                    adaptive_wait = TIME_PER_BUFFER
+                
                 # If we're writing too fast, wait to match hardware playback rate
-                if elapsed < TIME_PER_BUFFER:
-                    sleep_time = TIME_PER_BUFFER - elapsed
-                    time.sleep(sleep_time)
+                # This ensures we don't consume frames faster than hardware can play them
+                if elapsed < adaptive_wait:
+                    sleep_time = adaptive_wait - elapsed
+                    if sleep_time > 0.001:  # Only sleep if significant (>1ms)
+                        time.sleep(sleep_time)
                 
                 try:
                     audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
