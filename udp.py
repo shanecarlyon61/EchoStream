@@ -114,7 +114,7 @@ def udp_listener_worker(arg=None):
         print("UDP Listener: ERROR - Invalid socket")
         return None
     
-    print(f"Listening on UDP socket (timeout=0.1s)...")
+    print("Listening on UDP socket (blocking mode, 10s timeout)...")
     print(f"[UDP] Socket details: {global_udp_socket}")
     if global_server_addr:
         print(f"[UDP] Server address: {global_server_addr}")
@@ -126,17 +126,15 @@ def udp_listener_worker(arg=None):
     except Exception as e:
         print(f"[UDP] Could not get socket info: {e}")
     
-    udp_debug_count = 0
-    
     packet_count = 0
     timeout_count = 0
     last_packet_time = time.time()
     startup_time = time.time()
     
     # Log initial state
-    print(f"[UDP] Listener started, waiting for packets...")
-    print(f"[UDP] NOTE: Server may only send audio when client is transmitting!")
-    print(f"[UDP] Make sure GPIO is active and input audio is being captured.")
+    print("[UDP] Listener started, waiting for packets...")
+    print("[UDP] NOTE: Server may only send audio when client is transmitting!")
+    print("[UDP] Make sure GPIO is active and input audio is being captured.")
     
     while not global_interrupted.is_set():
         try:
