@@ -387,9 +387,15 @@ def audio_output_worker(audio_stream: AudioStream):
     
     # Buffer size: At 48kHz, 1024 samples take ~21.3ms to play
     # PyAudio's blocking write() should naturally rate-limit to match hardware playback rate
+    # However, we need explicit rate limiting to prevent consuming frames faster than they arrive
     FRAMES_PER_BUFFER = 1024
     import time
     write_count = 0
+    
+    # Rate limiting: At 48kHz, 1024 samples = 21.33ms per buffer
+    # Add small safety margin to prevent consuming faster than hardware can play
+    TIME_PER_BUFFER = FRAMES_PER_BUFFER / SAMPLE_RATE  # ~0.0213 seconds
+    last_write_time = time.time()
     
     while not global_interrupted.is_set() and audio_stream.transmitting:
         if audio_stream.output_stream is None:
@@ -462,31 +468,48 @@ def audio_output_worker(audio_stream: AudioStream):
                     # Check buffer status for logging
                     jitter_frames = audio_stream.output_jitter.frame_count
                     
+                    # Track if we've ever had frames (to distinguish initial wait from underrun)
+                    if not hasattr(audio_output_worker, '_has_had_frames'):
+                        audio_output_worker._has_had_frames = {}
+                    if audio_stream.channel_id not in audio_output_worker._has_had_frames:
+                        audio_output_worker._has_had_frames[audio_stream.channel_id] = False
+                    
                     # Check if buffer is ready (has minimum threshold of frames)
-                    if jitter_frames >= MIN_BUFFER_THRESHOLD:
-                        buffer_ready = True
-                        if buffer_wait_count > 0:
-                            print(f"[JITTER READY] Channel {audio_stream.channel_id}: Buffer ready! frames={jitter_frames} (waited {buffer_wait_count} cycles)")
-                            buffer_wait_count = 0
-                    elif jitter_frames > 0:
-                        # Buffer has some frames but not enough - still use them, but log wait
-                        buffer_ready = True  # Allow playback even with fewer frames
+                    # Wait for buffer to fill initially, but allow playback once we've had frames
+                    if jitter_frames == 0:
+                        # Buffer empty
+                        if not audio_output_worker._has_had_frames[audio_stream.channel_id]:
+                            # Initial wait - buffer hasn't filled yet, wait for first packets
+                            # Release lock and wait before trying again
+                            # This prevents busy-waiting and allows UDP packets to arrive
+                            time.sleep(0.01)  # Wait 10ms for packets to arrive
+                            continue  # Skip this iteration, try again next loop
+                        else:
+                            # Buffer was full but now empty - underrun condition
+                            # Match C: fill with silence but log the underrun
+                            static_underrun_count = getattr(audio_output_worker, '_underrun_count', {})
+                            if audio_stream.channel_id not in static_underrun_count:
+                                static_underrun_count[audio_stream.channel_id] = 0
+                            static_underrun_count[audio_stream.channel_id] += 1
+                            audio_output_worker._underrun_count = static_underrun_count
+                            
+                            if static_underrun_count[audio_stream.channel_id] == 1:
+                                print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer empty! (read_idx={audio_stream.output_jitter.read_index}, write_idx={audio_stream.output_jitter.write_index})")
+                            elif static_underrun_count[audio_stream.channel_id] % 500 == 0:
+                                print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer still empty (underrun_count={static_underrun_count[audio_stream.channel_id]})")
+                            # Continue to fill with silence (match C behavior)
+                    elif jitter_frames < MIN_BUFFER_THRESHOLD:
+                        # Buffer has some frames but not enough - log but allow playback
                         buffer_wait_count += 1
                         if buffer_wait_count % 100 == 0:
                             print(f"[JITTER WAIT] Channel {audio_stream.channel_id}: Buffer low (frames={jitter_frames}/{MIN_BUFFER_THRESHOLD}, wait_count={buffer_wait_count})")
+                        audio_output_worker._has_had_frames[audio_stream.channel_id] = True
                     else:
-                        # Buffer empty
-                        buffer_ready = False
-                        static_underrun_count = getattr(audio_output_worker, '_underrun_count', {})
-                        if audio_stream.channel_id not in static_underrun_count:
-                            static_underrun_count[audio_stream.channel_id] = 0
-                        static_underrun_count[audio_stream.channel_id] += 1
-                        audio_output_worker._underrun_count = static_underrun_count
-                        
-                        if static_underrun_count[audio_stream.channel_id] == 1:
-                            print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer empty! (read_idx={audio_stream.output_jitter.read_index}, write_idx={audio_stream.output_jitter.write_index})")
-                        elif static_underrun_count[audio_stream.channel_id] % 500 == 0:
-                            print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer still empty (underrun_count={static_underrun_count[audio_stream.channel_id]})")
+                        # Buffer ready
+                        if buffer_wait_count > 0:
+                            print(f"[JITTER READY] Channel {audio_stream.channel_id}: Buffer ready! frames={jitter_frames} (waited {buffer_wait_count} cycles)")
+                            buffer_wait_count = 0
+                        audio_output_worker._has_had_frames[audio_stream.channel_id] = True
                     
                     # Fill buffer from jitter buffer (match C: while loop to fill ALL frames)
                     # IMPORTANT: Always fill entire buffer - match C implementation exactly
@@ -585,9 +608,20 @@ def audio_output_worker(audio_stream: AudioStream):
                 audio_bytes = samples_to_play.astype(np.float32).tobytes()
                 
                 # Write to output stream (this should block if buffer is full)
+                # Add rate limiting to prevent consuming frames faster than hardware can play
+                # Match C callback timing: hardware calls callback when it needs data
+                current_time = time.time()
+                elapsed = current_time - last_write_time
+                
+                # If we're writing too fast, wait to match hardware playback rate
+                if elapsed < TIME_PER_BUFFER:
+                    sleep_time = TIME_PER_BUFFER - elapsed
+                    time.sleep(sleep_time)
+                
                 try:
                     audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
                     write_count += 1
+                    last_write_time = time.time()  # Update after successful write
                 except Exception as e:
                     print(f"[AUDIO ERROR] Channel {audio_stream.channel_id}: Write error: {e}")
                     time.sleep(0.01)  # Small delay on error
