@@ -363,8 +363,9 @@ def audio_input_worker(audio_stream: AudioStream):
 
 def audio_output_worker(audio_stream: AudioStream):
     """Audio output worker thread - plays audio from jitter buffer or passthrough"""
-    from echostream import global_interrupted
+    from echostream import global_interrupted, SAMPLE_RATE
     import tone_detect
+    import time
     
     print(f"[AUDIO] Output worker started for channel {audio_stream.channel_id}")
     
@@ -378,6 +379,10 @@ def audio_output_worker(audio_stream: AudioStream):
     MIN_BUFFER_THRESHOLD = 2
     buffer_ready = False
     buffer_wait_count = 0
+    
+    # Buffer size: At 48kHz, 1024 samples take ~21.3ms to play
+    # PyAudio's blocking write() will naturally rate-limit to match playback rate
+    FRAMES_PER_BUFFER = 1024
     
     while not global_interrupted.is_set() and audio_stream.transmitting:
         if audio_stream.output_stream is None:
@@ -413,11 +418,13 @@ def audio_output_worker(audio_stream: AudioStream):
             # If not passthrough or no passthrough data, get from jitter buffer
             # Match C implementation: accumulate samples from multiple frames to fill requested buffer
             if samples_to_play is None:
-                frames_to_fill = 1024  # Target buffer size
+                frames_to_fill = 1024  # Target buffer size (match C: frames parameter)
                 frames_filled = 0
                 output_buffer = np.zeros(frames_to_fill, dtype=np.float32)
                 
+                # Lock jitter buffer and fill output buffer (match C: while loop)
                 with audio_stream.output_jitter.mutex:
+                    # Check buffer status for logging
                     jitter_frames = audio_stream.output_jitter.frame_count
                     
                     # Check if buffer is ready (has minimum threshold of frames)
@@ -427,11 +434,11 @@ def audio_output_worker(audio_stream: AudioStream):
                             print(f"[JITTER READY] Channel {audio_stream.channel_id}: Buffer ready! frames={jitter_frames} (waited {buffer_wait_count} cycles)")
                             buffer_wait_count = 0
                     elif jitter_frames > 0:
-                        # Buffer has some frames but not enough - wait a bit
-                        buffer_ready = False
+                        # Buffer has some frames but not enough - still use them, but log wait
+                        buffer_ready = True  # Allow playback even with fewer frames
                         buffer_wait_count += 1
                         if buffer_wait_count % 100 == 0:
-                            print(f"[JITTER WAIT] Channel {audio_stream.channel_id}: Waiting for buffer to fill (frames={jitter_frames}/{MIN_BUFFER_THRESHOLD}, wait_count={buffer_wait_count})")
+                            print(f"[JITTER WAIT] Channel {audio_stream.channel_id}: Buffer low (frames={jitter_frames}/{MIN_BUFFER_THRESHOLD}, wait_count={buffer_wait_count})")
                     else:
                         # Buffer empty
                         buffer_ready = False
@@ -446,99 +453,123 @@ def audio_output_worker(audio_stream: AudioStream):
                         elif static_underrun_count[audio_stream.channel_id] % 500 == 0:
                             print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer still empty (underrun_count={static_underrun_count[audio_stream.channel_id]})")
                     
-                    # Fill buffer from jitter buffer (match C implementation: while loop to fill all frames)
-                    while frames_filled < frames_to_fill and buffer_ready and jitter_frames > 0:
-                        frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.read_index]
-                        
-                        if frame.valid:
-                            # Calculate how many samples we can copy from current frame
-                            remaining_in_frame = frame.sample_count - audio_stream.current_output_frame_pos
-                            frames_to_copy = frames_to_fill - frames_filled
+                    # Fill buffer from jitter buffer (match C: while loop to fill ALL frames)
+                    # IMPORTANT: Always fill entire buffer, even if we run out of jitter frames
+                    while frames_filled < frames_to_fill:
+                        if audio_stream.output_jitter.frame_count > 0:
+                            frame = audio_stream.output_jitter.frames[audio_stream.output_jitter.read_index]
                             
-                            if frames_to_copy > remaining_in_frame:
-                                frames_to_copy = remaining_in_frame
-                            
-                            # Copy samples from current frame with gain boost (match C: 1.5x gain)
-                            output_gain = 1.5
-                            for i in range(frames_to_copy):
-                                sample = frame.samples[audio_stream.current_output_frame_pos + i] * output_gain
-                                # Clamp to prevent distortion
-                                if sample > 1.0:
-                                    sample = 1.0
-                                elif sample < -1.0:
-                                    sample = -1.0
-                                output_buffer[frames_filled + i] = sample
-                            
-                            frames_filled += frames_to_copy
-                            audio_stream.current_output_frame_pos += frames_to_copy
-                            
-                            # Check if we finished this frame
-                            if audio_stream.current_output_frame_pos >= frame.sample_count:
-                                # Mark frame as consumed
-                                frame.valid = False
-                                old_read_idx = audio_stream.output_jitter.read_index
+                            if frame.valid:
+                                # Calculate how many samples we can copy from current frame
+                                remaining_in_frame = frame.sample_count - audio_stream.current_output_frame_pos
+                                frames_to_copy = frames_to_fill - frames_filled
+                                
+                                if frames_to_copy > remaining_in_frame:
+                                    frames_to_copy = remaining_in_frame
+                                
+                                # Copy samples from current frame with gain boost (match C: 1.5x gain)
+                                output_gain = 1.5
+                                for i in range(frames_to_copy):
+                                    sample = frame.samples[audio_stream.current_output_frame_pos + i] * output_gain
+                                    # Clamp to prevent distortion
+                                    if sample > 1.0:
+                                        sample = 1.0
+                                    elif sample < -1.0:
+                                        sample = -1.0
+                                    output_buffer[frames_filled + i] = sample
+                                
+                                frames_filled += frames_to_copy
+                                audio_stream.current_output_frame_pos += frames_to_copy
+                                
+                                # Check if we finished this frame
+                                if audio_stream.current_output_frame_pos >= frame.sample_count:
+                                    # Mark frame as consumed
+                                    frame.valid = False
+                                    old_read_idx = audio_stream.output_jitter.read_index
+                                    audio_stream.output_jitter.read_index = (
+                                        audio_stream.output_jitter.read_index + 1
+                                    ) % JITTER_BUFFER_SIZE
+                                    audio_stream.output_jitter.frame_count -= 1
+                                    audio_stream.current_output_frame_pos = 0
+                                    
+                                    # Log frame consumption occasionally
+                                    if output_count % 500 == 0:
+                                        print(f"[JITTER READ] Channel {audio_stream.channel_id}: Consumed frame at idx {old_read_idx}, "
+                                              f"remaining_frames={audio_stream.output_jitter.frame_count}")
+                            else:
+                                # Frame is invalid, skip it
                                 audio_stream.output_jitter.read_index = (
                                     audio_stream.output_jitter.read_index + 1
                                 ) % JITTER_BUFFER_SIZE
                                 audio_stream.output_jitter.frame_count -= 1
-                                jitter_frames -= 1
                                 audio_stream.current_output_frame_pos = 0
                                 
-                                # Log frame consumption occasionally
-                                if output_count % 500 == 0:
-                                    print(f"[JITTER READ] Channel {audio_stream.channel_id}: Consumed frame at idx {old_read_idx}, "
-                                          f"remaining_frames={audio_stream.output_jitter.frame_count}")
+                                static_invalid_count = getattr(audio_output_worker, '_invalid_frame_count', {})
+                                if audio_stream.channel_id not in static_invalid_count:
+                                    static_invalid_count[audio_stream.channel_id] = 0
+                                static_invalid_count[audio_stream.channel_id] += 1
+                                audio_output_worker._invalid_frame_count = static_invalid_count
+                                
+                                if static_invalid_count[audio_stream.channel_id] % 100 == 0:
+                                    print(f"[JITTER WARNING] Channel {audio_stream.channel_id}: Invalid frame at read_idx {audio_stream.output_jitter.read_index} "
+                                          f"(frame_count={audio_stream.output_jitter.frame_count}) - advancing read index")
                         else:
-                            # Frame is invalid, skip it
-                            audio_stream.output_jitter.read_index = (
-                                audio_stream.output_jitter.read_index + 1
-                            ) % JITTER_BUFFER_SIZE
-                            audio_stream.output_jitter.frame_count -= 1
-                            jitter_frames -= 1
-                            audio_stream.current_output_frame_pos = 0
-                            
-                            static_invalid_count = getattr(audio_output_worker, '_invalid_frame_count', {})
-                            if audio_stream.channel_id not in static_invalid_count:
-                                static_invalid_count[audio_stream.channel_id] = 0
-                            static_invalid_count[audio_stream.channel_id] += 1
-                            audio_output_worker._invalid_frame_count = static_invalid_count
-                            
-                            if static_invalid_count[audio_stream.channel_id] % 100 == 0:
-                                print(f"[JITTER WARNING] Channel {audio_stream.channel_id}: Invalid frame at read_idx {audio_stream.output_jitter.read_index} "
-                                      f"(frame_count={jitter_frames}) - advancing read index")
-                    
-                    # If we filled any frames, use them; otherwise fill with silence
-                    if frames_filled > 0:
-                        samples_to_play = output_buffer[:frames_filled]
-                    else:
-                        # No frames available, fill with silence (match C implementation)
-                        samples_to_play = np.zeros(frames_to_fill, dtype=np.float32)
+                            # No frames available, fill remainder with silence (match C implementation)
+                            # This ensures we always fill the entire buffer
+                            for i in range(frames_filled, frames_to_fill):
+                                output_buffer[i] = 0.0
+                            frames_filled = frames_to_fill
+                            break
+                
+                # Always use the filled buffer (will contain audio + silence if buffer ran out)
+                samples_to_play = output_buffer
             
             # Play audio (gain already applied during buffer fill)
+            # PyAudio's blocking write() will naturally rate-limit to match playback rate
+            # Always write the full buffer (1024 samples) - this matches C implementation
             if samples_to_play is not None and len(samples_to_play) > 0:
                 # Ensure samples are in correct format (gain already applied)
                 samples_to_play = np.clip(samples_to_play, -1.0, 1.0)
+                
+                # Always write exactly FRAMES_PER_BUFFER samples (match C: always fill entire buffer)
+                if len(samples_to_play) < FRAMES_PER_BUFFER:
+                    # Pad with silence if needed (shouldn't happen, but be safe)
+                    padded = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
+                    padded[:len(samples_to_play)] = samples_to_play
+                    samples_to_play = padded
+                elif len(samples_to_play) > FRAMES_PER_BUFFER:
+                    # Truncate if somehow too large (shouldn't happen)
+                    samples_to_play = samples_to_play[:FRAMES_PER_BUFFER]
+                
                 audio_bytes = samples_to_play.astype(np.float32).tobytes()
                 audio_stream.output_stream.write(audio_bytes, exception_on_underflow=False)
+                
                 output_count += 1
+                
+                # Calculate RMS to detect if we're playing audio or silence
+                rms = np.sqrt(np.mean(samples_to_play**2))
+                is_silence = rms < 0.001  # Threshold for silence detection
+                
                 if output_count % 1000 == 0:  # Log every ~10 seconds
-                    rms = np.sqrt(np.mean(samples_to_play**2))
                     with audio_stream.output_jitter.mutex:
                         jitter_frames = audio_stream.output_jitter.frame_count
-                    print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing audio (RMS={rms:.4f}, "
-                          f"samples={len(samples_to_play)}, jitter_frames={jitter_frames})")
+                    
+                    if is_silence:
+                        print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing SILENCE "
+                              f"(RMS={rms:.6f}, jitter_frames={jitter_frames}, samples={len(samples_to_play)})")
+                    else:
+                        print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing AUDIO "
+                              f"(RMS={rms:.4f}, jitter_frames={jitter_frames}, samples={len(samples_to_play)})")
             else:
-                # No audio available, play silence
-                silence = np.zeros(1024, dtype=np.float32)
+                # Fallback: should never happen since we always fill buffer above
+                silence = np.zeros(FRAMES_PER_BUFFER, dtype=np.float32)
                 audio_stream.output_stream.write(silence.tobytes(), exception_on_underflow=False)
                 silence_count += 1
                 if silence_count % 1000 == 0:  # Log every ~10 seconds
                     with audio_stream.output_jitter.mutex:
                         jitter_frames = audio_stream.output_jitter.frame_count
-                    print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing silence "
-                          f"(jitter_frames={jitter_frames}, passthrough_active={is_passthrough_target and tone_detect.global_tone_detection.passthrough_active})")
-                if not is_passthrough_target or not tone_detect.global_tone_detection.passthrough_active:
-                    time.sleep(0.01)  # Small delay when no audio
+                    print(f"[AUDIO OUT] Channel {audio_stream.channel_id}: Playing silence (fallback) "
+                          f"(jitter_frames={jitter_frames})")
             
         except Exception as e:
             if not global_interrupted.is_set():
