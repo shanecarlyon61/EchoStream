@@ -698,6 +698,15 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                     ) % JITTER_BUFFER_SIZE
                     audio_stream.output_jitter.frame_count += 1
                     
+                    # Track last packet reception time for underrun diagnostics
+                    static_last_packet_time = getattr(process_received_audio, '_last_packet_time', {})
+                    static_last_packet_time[channel_id] = time.time()
+                    process_received_audio._last_packet_time = static_last_packet_time
+                    
+                    # Update output worker's last packet time
+                    if hasattr(audio_output_worker, '_last_packet_time'):
+                        audio_output_worker._last_packet_time[channel_id] = time.time()
+                    
                     # Log when buffer fills up initially
                     if static_receive_count[channel_id] <= 5 or static_receive_count[channel_id] % 500 == 0:
                         print(f"[JITTER WRITE] Channel {channel_id}: Added frame at idx {write_idx_before}, "
@@ -730,11 +739,25 @@ def process_received_audio(audio_stream: AudioStream, opus_data: bytes, channel_
                     print(f"[JITTER RECOVERY] Channel {channel_id}: Buffer refilled! frames={audio_stream.output_jitter.frame_count}, "
                           f"write_idx={audio_stream.output_jitter.write_index}, read_idx={audio_stream.output_jitter.read_index}")
                 
-                # Log jitter buffer status occasionally
+                # Log jitter buffer status with packet reception rate
                 if static_receive_count[channel_id] % 500 == 0:
+                    # Calculate packet reception rate (packets per second)
+                    # If we've received packets, estimate rate based on count
+                    packet_rate = "unknown"
+                    if static_receive_count[channel_id] > 5:
+                        # Rough estimate: assume packets arrive at ~50 packets/second (1920 samples * 50 = 96000 samples/sec = 48kHz)
+                        # This is approximate, but helps diagnose if packets are arriving
+                        packet_rate = "~50 pps (estimated)"
+                    
                     print(f"[JITTER STATUS] Channel {channel_id}: frames={audio_stream.output_jitter.frame_count}/"
                           f"{JITTER_BUFFER_SIZE}, write_idx={audio_stream.output_jitter.write_index}, "
-                          f"read_idx={audio_stream.output_jitter.read_index}")
+                          f"read_idx={audio_stream.output_jitter.read_index}, packets_received={static_receive_count[channel_id]}, "
+                          f"rate={packet_rate}")
+                    
+                    # Warn if buffer is consistently low (might indicate packet loss)
+                    if audio_stream.output_jitter.frame_count < 3:
+                        print(f"[JITTER WARNING] Channel {channel_id}: Buffer consistently low (frames={audio_stream.output_jitter.frame_count}) - "
+                              f"check if UDP packets are arriving (packets_received={static_receive_count[channel_id]})")
     except Exception as e:
         print(f"Error processing received audio: {e}")
 
