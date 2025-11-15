@@ -120,10 +120,6 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
         
         if len(data) == 0:
             return None
-    except OSError as e:
-        if e.errno == 9 or e.errno == 107:
-            return None
-        raise
         
         try:
             message = json.loads(data.decode('utf-8'))
