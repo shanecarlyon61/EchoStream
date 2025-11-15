@@ -5,6 +5,7 @@ This module provides system-wide constants and shared data structures
 for the EchoStream audio streaming system.
 """
 import threading
+import numpy as np
 from typing import List, Optional
 
 
@@ -50,60 +51,65 @@ class JitterBuffer:
     """
     Jitter buffer for audio playback to handle network delay variations.
     
-    Thread-safe buffer that stores audio frames with sequence numbers
-    for proper playback order and timing.
+    Thread-safe buffer that stores decoded float32 audio frames.
+    Matches C implementation: stores float samples (not Opus bytes).
     """
     def __init__(self, buffer_size: int = JITTER_BUFFER_SIZE):
         """Initialize jitter buffer with specified size."""
         self.buffer_size = buffer_size
-        self.frames: List[Optional[bytes]] = [None] * buffer_size
+        self.frames: List[Optional[np.ndarray]] = [None] * buffer_size
+        self.sample_counts: List[int] = [0] * buffer_size
         self.write_index = 0
         self.read_index = 0
         self.frame_count = 0
         self.mutex = threading.Lock()
     
-    def write(self, frame: bytes) -> bool:
+    def write(self, samples: np.ndarray, sample_count: int) -> bool:
         """
-        Write a frame to the buffer.
+        Write decoded float samples to the buffer.
         
         Args:
-            frame: Audio frame data (Opus encoded)
+            samples: Audio samples as numpy array (float32)
+            sample_count: Number of valid samples in the array
             
         Returns:
             True if frame was written, False if buffer is full
         """
         with self.mutex:
             if self.frame_count >= self.buffer_size:
-                # Buffer full, drop oldest frame
                 self.read_index = (self.read_index + 1) % self.buffer_size
                 self.frame_count -= 1
             
-            self.frames[self.write_index] = frame
+            self.frames[self.write_index] = samples.copy()
+            self.sample_counts[self.write_index] = sample_count
             self.write_index = (self.write_index + 1) % self.buffer_size
             self.frame_count += 1
             return True
     
-    def read(self) -> Optional[bytes]:
+    def read(self) -> Optional[tuple[np.ndarray, int]]:
         """
         Read a frame from the buffer.
         
         Returns:
-            Frame data if available, None if buffer is empty
+            Tuple of (samples array, sample_count) if available, None if buffer is empty
         """
         with self.mutex:
             if self.frame_count == 0:
                 return None
             
-            frame = self.frames[self.read_index]
+            samples = self.frames[self.read_index]
+            sample_count = self.sample_counts[self.read_index]
             self.frames[self.read_index] = None
+            self.sample_counts[self.read_index] = 0
             self.read_index = (self.read_index + 1) % self.buffer_size
             self.frame_count -= 1
-            return frame
+            return samples, sample_count
     
     def clear(self):
         """Clear all frames from the buffer."""
         with self.mutex:
             self.frames = [None] * self.buffer_size
+            self.sample_counts = [0] * self.buffer_size
             self.write_index = 0
             self.read_index = 0
             self.frame_count = 0

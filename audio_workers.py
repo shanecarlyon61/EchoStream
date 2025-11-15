@@ -232,18 +232,17 @@ def audio_output_worker(stream):
                     time.sleep(0.01)
                     continue
                 
-                # Read from jitter buffer
-                opus_data = read_from_jitter_buffer(stream)
+                # Read decoded float samples from jitter buffer (no Opus decode needed)
+                result = stream.output_jitter.read()
                 
-                if opus_data:
-                    # Decode Opus to samples
-                    samples = audio_stream.decode_audio(stream, opus_data)
-                    
-                    if samples is not None:
-                        # Write to output stream
+                if result:
+                    samples, sample_count = result
+                    if samples is not None and sample_count > 0:
+                        # Write samples to output stream (only valid samples)
                         try:
+                            samples_to_write = samples[:sample_count] if sample_count < len(samples) else samples
                             stream.output_stream.write(
-                                samples.tobytes(),
+                                samples_to_write.tobytes(),
                                 exception_on_underflow=False
                             )
                             silence_count = 0
@@ -318,29 +317,17 @@ def write_to_shared_buffer(samples: np.ndarray, sample_count: int):
     global_shared_buffer.write(samples, sample_count)
 
 
-def read_from_jitter_buffer(stream) -> Optional[bytes]:
+
+
+def write_to_jitter_buffer(stream, samples: np.ndarray, sample_count: int) -> bool:
     """
-    Read Opus-encoded audio frame from jitter buffer.
+    Write decoded float samples to jitter buffer.
+    Matches C code: stores float samples, not Opus bytes.
     
     Args:
         stream: AudioStream instance
-        
-    Returns:
-        Opus-encoded frame bytes or None if buffer is empty
-    """
-    if stream.output_jitter is None:
-        return None
-    
-    return stream.output_jitter.read()
-
-
-def write_to_jitter_buffer(stream, opus_data: bytes) -> bool:
-    """
-    Write Opus-encoded audio frame to jitter buffer.
-    
-    Args:
-        stream: AudioStream instance
-        opus_data: Opus-encoded frame bytes
+        samples: Decoded float32 audio samples
+        sample_count: Number of valid samples
         
     Returns:
         True if written successfully, False if buffer is full
@@ -348,7 +335,7 @@ def write_to_jitter_buffer(stream, opus_data: bytes) -> bool:
     if stream.output_jitter is None:
         return False
     
-    return stream.output_jitter.write(opus_data)
+    return stream.output_jitter.write(samples, sample_count)
 
 
 def init_shared_audio_buffer() -> bool:

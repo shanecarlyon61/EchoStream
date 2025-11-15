@@ -207,10 +207,51 @@ def handle_udp_ready(udp_config: Dict[str, Any]):
                                 print(f"[EVENT] WARNING: Decryption failed for channel {channel_id} (failure #{count})")
                             return
                         
-                        # Write Opus data to jitter buffer (match C code's jitter buffer write)
-                        # Note: In C code, it also decodes Opus and converts to float32,
-                        # but here we write the Opus data directly and let output worker decode
-                        success = audio_workers.write_to_jitter_buffer(ctx.audio, decrypted)
+                        # Decode Opus immediately (match C code: decode before jitter buffer)
+                        import audio_stream
+                        import numpy as np
+                        from echostream import SAMPLES_PER_FRAME
+                        
+                        # Decode Opus to PCM (short samples) - match C code
+                        if ctx.audio.decoder is None:
+                            return
+                        
+                        try:
+                            # Decode Opus to PCM (opuslib returns bytes as int16 PCM samples)
+                            decoded_bytes = ctx.audio.decoder.decode(decrypted, SAMPLES_PER_FRAME)
+                            
+                            # opuslib.decoder.decode returns PCM bytes (int16 format, like C's opus_decode)
+                            # Convert bytes to numpy array (int16) - match C code's short pcm_data[1920]
+                            pcm_data = np.frombuffer(decoded_bytes, dtype=np.int16)
+                            samples_count = len(pcm_data)
+                            
+                            if samples_count > 0:
+                                # Convert PCM int16 to float32 with 20x gain boost (match C code exactly)
+                                # C code: float sample = (float)pcm_data[j] / 32767.0f; sample *= 20.0f;
+                                float_samples = (pcm_data.astype(np.float32) / 32767.0) * 20.0
+                                
+                                # Clamp to prevent distortion (match C code)
+                                float_samples = np.clip(float_samples, -1.0, 1.0)
+                                
+                                # Ensure we have exactly SAMPLES_PER_FRAME samples
+                                if len(float_samples) < SAMPLES_PER_FRAME:
+                                    padded = np.zeros(SAMPLES_PER_FRAME, dtype=np.float32)
+                                    padded[:len(float_samples)] = float_samples
+                                    float_samples = padded
+                                
+                                # Write decoded float samples to jitter buffer (match C code)
+                                success = audio_workers.write_to_jitter_buffer(ctx.audio, float_samples, samples_count)
+                            else:
+                                success = False
+                        except Exception as e:
+                            static_decode_failures = getattr(handle_udp_packet, '_decode_failures', {})
+                            count = static_decode_failures.get(channel_id, 0) + 1
+                            static_decode_failures[channel_id] = count
+                            handle_udp_packet._decode_failures = static_decode_failures
+                            
+                            if count <= 3 or count % 50 == 0:
+                                print(f"[EVENT] WARNING: Opus decode failed for channel {channel_id} (failure #{count}): {e}")
+                            success = False
                         
                         if not success:
                             # Buffer full (should rarely happen, but log if it does)
