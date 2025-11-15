@@ -25,11 +25,11 @@ class AudioStream:
         self.gpio_active: bool = False
         self.transmitting: bool = False
 
-        self.input_buffer: np.ndarray = np.zeros(4800, dtype=np.float32)
+        self.input_buffer: np.ndarray = np.zeros(9600, dtype=np.float32)
         self.input_buffer_pos: int = 0
         self.current_output_frame_pos: int = 0
 
-        self.buffer_size: int = 4800
+        self.buffer_size: int = 9600
 
 def create_stream(channel_id: str, device_index: int, pa_instance: pyaudio.PyAudio) -> Optional[AudioStream]:
 
@@ -63,7 +63,7 @@ def create_stream(channel_id: str, device_index: int, pa_instance: pyaudio.PyAud
 
     stream.output_jitter = JitterBuffer()
 
-    stream.input_buffer = np.zeros(4800, dtype=np.float32)
+    stream.input_buffer = np.zeros(9600, dtype=np.float32)
     stream.input_buffer_pos = 0
 
     print(f"[AUDIO_STREAM] AudioStream created for channel {channel_id} (device {device_index})")
@@ -90,7 +90,7 @@ def start_stream(stream: AudioStream, pa_instance: pyaudio.PyAudio) -> bool:
                 rate=SAMPLE_RATE,
                 input=True,
                 input_device_index=stream.device_index,
-                frames_per_buffer=1024,
+                frames_per_buffer=2048,
                 stream_callback=None
             )
             stream.input_stream.start_stream()
@@ -106,7 +106,7 @@ def start_stream(stream: AudioStream, pa_instance: pyaudio.PyAudio) -> bool:
                 rate=SAMPLE_RATE,
                 output=True,
                 output_device_index=stream.device_index,
-                frames_per_buffer=1024,
+                frames_per_buffer=2048,
                 stream_callback=None
             )
             stream.output_stream.start_stream()

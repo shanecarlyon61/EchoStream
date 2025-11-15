@@ -13,7 +13,7 @@ CHANNEL_ID_LEN = 64
 MAX_TONE_DEFINITIONS = 100
 MAX_FILTERS = 50
 
-JITTER_BUFFER_SIZE = 8
+JITTER_BUFFER_SIZE = 32
 
 global_interrupted = threading.Event()
 
