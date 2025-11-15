@@ -335,89 +335,115 @@ def process_audio_python_approach(samples: np.ndarray, sample_count: int) -> boo
         # Extract tone A and tone B segments (like ToneDetect)
         buf_array = np.array(global_tone_detection.audio_buffer)
         # Convert to integer indices for array slicing
-        start_idx = int((l_a + l_b) * SAMPLE_RATE)
-        end_idx = int(l_b * SAMPLE_RATE)
-        
-        # Safety check: ensure indices are valid
-        if start_idx <= 0 or end_idx <= 0 or start_idx <= end_idx:
-            continue
-        if len(buf_array) < start_idx:
-            continue
-        
-        # Extract segments
-        tone_a_segment = buf_array[-start_idx:-end_idx] if end_idx > 0 else buf_array[-start_idx:]
-        tone_b_segment = buf_array[-end_idx:]
-        
-        if len(tone_a_segment) < int(SAMPLE_RATE * 0.1) or len(tone_b_segment) < int(SAMPLE_RATE * 0.1):
-            continue
-        
-        # Detect frequencies using parabolic interpolation (like ToneDetect)
+        # Ensure l_a and l_b are valid numbers
         try:
-            a_tone_freq = freq_from_fft(tone_a_segment, SAMPLE_RATE)
-            b_tone_freq = freq_from_fft(tone_b_segment, SAMPLE_RATE)
-        except Exception as e:
-            if static_process_count % 100 == 0:
-                print(f"[TONE DEBUG] FFT error: {e}")
-            continue
-        
-        # Check against tone definitions with matching lengths
-        tolerance = 10  # Default tolerance in Hz
-        detected = False
-        
-        for tone_def in global_tone_detection.tone_definitions:
-            if not tone_def.valid:
+            # Check for NaN or Inf values
+            if not np.isfinite(l_a) or not np.isfinite(l_b) or l_a <= 0 or l_b <= 0:
                 continue
             
-            # Check if lengths match
-            if abs(tone_def.tone_a_length_ms / 1000.0 - l_a) > 0.1 or \
-               abs(tone_def.tone_b_length_ms / 1000.0 - l_b) > 0.1:
+            start_idx_val = (l_a + l_b) * SAMPLE_RATE
+            end_idx_val = l_b * SAMPLE_RATE
+            
+            # Check if calculations resulted in valid numbers
+            if not np.isfinite(start_idx_val) or not np.isfinite(end_idx_val):
                 continue
             
-            # Check if frequencies match (use tone_a_range and tone_b_range as tolerance)
-            a_match = abs(tone_def.tone_a_freq - a_tone_freq) <= max(tone_def.tone_a_range_hz, tolerance)
-            b_match = abs(tone_def.tone_b_freq - b_tone_freq) <= max(tone_def.tone_b_range_hz, tolerance)
+            # Convert to integers, ensuring they're valid
+            start_idx = int(np.round(start_idx_val))
+            end_idx = int(np.round(end_idx_val))
             
-            # Prevent duplicate detections (like ToneDetect)
-            time_since_last = current_time_ms - global_tone_detection.last_detect_time
-            max_tone_len_ms = max(tone_def.tone_a_length_ms, tone_def.tone_b_length_ms)
+            # Safety check: ensure indices are valid positive integers
+            if start_idx <= 0 or end_idx <= 0 or start_idx <= end_idx:
+                continue
+            if len(buf_array) < start_idx:
+                continue
             
-            if a_match and b_match and time_since_last > max_tone_len_ms:
-                print("=" * 60)
-                print("[🎵 TONE SEQUENCE DETECTED! 🎵]")
-                print(f"  Tone ID: {tone_def.tone_id}")
-                print(f"  Tone A: {a_tone_freq:.1f} Hz (target: {tone_def.tone_a_freq} Hz ±{tone_def.tone_a_range_hz} Hz)")
-                print(f"  Tone B: {b_tone_freq:.1f} Hz (target: {tone_def.tone_b_freq} Hz ±{tone_def.tone_b_range_hz} Hz)")
-                print(f"  Tone A Length: {tone_def.tone_a_length_ms} ms")
-                print(f"  Tone B Length: {tone_def.tone_b_length_ms} ms")
-                print(f"  Record Length: {tone_def.record_length_ms} ms")
-                if tone_def.detection_tone_alert:
-                    print(f"  Alert Type: {tone_def.detection_tone_alert}")
-                print("=" * 60)
-                
-                global_tone_detection.last_detect_time = current_time_ms
-                
-                # Trigger passthrough immediately (both tones detected at once)
-                trigger_tone_passthrough(tone_def)
-                break
-        
-        # Debug: Log detected frequencies (occasionally, with tone match status)
-        if static_process_count % 500 == 0:  # Log every ~5 seconds
-            # Check if any tone matches
-            any_match = False
+            # Extract segments - ensure indices are integers for slicing
+            tone_a_segment = buf_array[-start_idx:-end_idx] if end_idx > 0 else buf_array[-start_idx:]
+            tone_b_segment = buf_array[-end_idx:]
+            
+            # Validate segment lengths
+            if len(tone_a_segment) < int(SAMPLE_RATE * 0.1) or len(tone_b_segment) < int(SAMPLE_RATE * 0.1):
+                continue
+            
+            # Detect frequencies using parabolic interpolation (like ToneDetect)
+            try:
+                a_tone_freq = freq_from_fft(tone_a_segment, SAMPLE_RATE)
+                b_tone_freq = freq_from_fft(tone_b_segment, SAMPLE_RATE)
+            except Exception as e:
+                if static_process_count % 100 == 0:
+                    print(f"[TONE DEBUG] FFT error: {e}")
+                continue
+            
+            # Only process tone definitions if FFT succeeded
+            # Check against tone definitions with matching lengths
+            tolerance = 10  # Default tolerance in Hz
+            detected = False
+            
             for tone_def in global_tone_detection.tone_definitions:
                 if not tone_def.valid:
                     continue
+                
+                # Check if lengths match
                 if abs(tone_def.tone_a_length_ms / 1000.0 - l_a) > 0.1 or \
                    abs(tone_def.tone_b_length_ms / 1000.0 - l_b) > 0.1:
                     continue
-                tolerance = max(tone_def.tone_a_range_hz, tone_def.tone_b_range_hz, 10)
-                a_match = abs(tone_def.tone_a_freq - a_tone_freq) <= tolerance
-                b_match = abs(tone_def.tone_b_freq - b_tone_freq) <= tolerance
-                if a_match or b_match:
-                    status = "MATCH" if (a_match and b_match) else ("A_ONLY" if a_match else "B_ONLY")
-                    print(f"[TONE SCAN] A: {a_tone_freq:.1f}Hz, B: {b_tone_freq:.1f}Hz | "
-                          f"Target: A={tone_def.tone_a_freq}Hz, B={tone_def.tone_b_freq}Hz | Status: {status}")
+                
+                # Check if frequencies match (use tone_a_range and tone_b_range as tolerance)
+                a_match = abs(tone_def.tone_a_freq - a_tone_freq) <= max(tone_def.tone_a_range_hz, tolerance)
+                b_match = abs(tone_def.tone_b_freq - b_tone_freq) <= max(tone_def.tone_b_range_hz, tolerance)
+                
+                # Prevent duplicate detections (like ToneDetect)
+                time_since_last = current_time_ms - global_tone_detection.last_detect_time
+                max_tone_len_ms = max(tone_def.tone_a_length_ms, tone_def.tone_b_length_ms)
+                
+                if a_match and b_match and time_since_last > max_tone_len_ms:
+                    print("=" * 60)
+                    print("[🎵 TONE SEQUENCE DETECTED! 🎵]")
+                    print(f"  Tone ID: {tone_def.tone_id}")
+                    print(f"  Tone A: {a_tone_freq:.1f} Hz (target: {tone_def.tone_a_freq} Hz ±{tone_def.tone_a_range_hz} Hz)")
+                    print(f"  Tone B: {b_tone_freq:.1f} Hz (target: {tone_def.tone_b_freq} Hz ±{tone_def.tone_b_range_hz} Hz)")
+                    print(f"  Tone A Length: {tone_def.tone_a_length_ms} ms")
+                    print(f"  Tone B Length: {tone_def.tone_b_length_ms} ms")
+                    print(f"  Record Length: {tone_def.record_length_ms} ms")
+                    if tone_def.detection_tone_alert:
+                        print(f"  Alert Type: {tone_def.detection_tone_alert}")
+                    print("=" * 60)
+                    
+                    global_tone_detection.last_detect_time = current_time_ms
+                    
+                    # Trigger passthrough immediately (both tones detected at once)
+                    trigger_tone_passthrough(tone_def)
                     break
+            
+            # Debug: Log detected frequencies (occasionally, with tone match status)
+            if static_process_count % 500 == 0:  # Log every ~5 seconds
+                # Check if any tone matches
+                any_match = False
+                for tone_def in global_tone_detection.tone_definitions:
+                    if not tone_def.valid:
+                        continue
+                    if abs(tone_def.tone_a_length_ms / 1000.0 - l_a) > 0.1 or \
+                       abs(tone_def.tone_b_length_ms / 1000.0 - l_b) > 0.1:
+                        continue
+                    tolerance = max(tone_def.tone_a_range_hz, tone_def.tone_b_range_hz, 10)
+                    a_match = abs(tone_def.tone_a_freq - a_tone_freq) <= tolerance
+                    b_match = abs(tone_def.tone_b_freq - b_tone_freq) <= tolerance
+                    if a_match or b_match:
+                        status = "MATCH" if (a_match and b_match) else ("A_ONLY" if a_match else "B_ONLY")
+                        print(f"[TONE SCAN] A: {a_tone_freq:.1f}Hz, B: {b_tone_freq:.1f}Hz | "
+                              f"Target: A={tone_def.tone_a_freq}Hz, B={tone_def.tone_b_freq}Hz | Status: {status}")
+                        break
+        except (ValueError, OverflowError, TypeError) as e:
+            # Skip this iteration if index calculation fails
+            if static_process_count % 100 == 0:
+                print(f"[TONE DEBUG] Index calculation error: {e}, l_a={l_a}, l_b={l_b}")
+            continue
+        except Exception as e:
+            # Catch any other unexpected errors during slicing
+            if static_process_count % 100 == 0:
+                print(f"[TONE DEBUG] Unexpected error in segment extraction: {e}")
+            continue
     
     # Check if recording timer expired
     if global_tone_detection.recording_active:

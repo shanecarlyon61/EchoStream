@@ -155,25 +155,26 @@ async def websocket_handler():
                             if udp.setup_global_udp(global_config):
                                 print("UDP connection established")
                                 
-                                # Start transmission for all active channels
+                                # Start transmission for all active channels (only if GPIO is active)
                                 for i in range(4):
                                     if audio.channels[i].active:
+                                        # Check GPIO status before starting transmission
+                                        if not audio.channels[i].audio.gpio_active:
+                                            print(f"[WEBSOCKET] Channel {audio.channels[i].audio.channel_id}: Skipping transmission start (GPIO not active)")
+                                            continue
+                                        
                                         key_b64 = "46dR4QR5KH7JhPyyjh/ZS4ki/3QBVwwOTkkQTdZQkC0="
                                         key_bytes = crypto.decode_base64(key_b64)
                                         if len(key_bytes) == 32:
                                             audio.channels[i].audio.key = list(key_bytes)
                                             print(f"AES key decoded for channel {audio.channels[i].audio.channel_id}")
                                             
+                                            # Start transmission only if GPIO is active
                                             if audio.start_transmission_for_channel(audio.channels[i].audio):
-                                                print(f"Audio transmission ready for channel {audio.channels[i].audio.channel_id} (waiting for GPIO activation)")
-                                                
-                                                # IMPORTANT: After UDP is configured and audio streams are started,
-                                                # resend transmit_started for channels with active GPIO
-                                                # This ensures the server knows the client is transmitting after UDP is ready
-                                                # The server only sends audio when it receives transmit_started
-                                                if audio.channels[i].audio.gpio_active:
-                                                    print(f"[UDP READY] Resending transmit_started for channel {audio.channels[i].audio.channel_id} (GPIO active, UDP now ready)")
-                                                    send_websocket_transmit_event(audio.channels[i].audio.channel_id, 1)
+                                                print(f"Audio transmission started for channel {audio.channels[i].audio.channel_id} (GPIO active)")
+                                                # Send transmit_started since GPIO is already confirmed active
+                                                print(f"[UDP READY] Sending transmit_started for channel {audio.channels[i].audio.channel_id} (GPIO active, UDP now ready)")
+                                                send_websocket_transmit_event(audio.channels[i].audio.channel_id, 1)
                                         else:
                                             print(f"Key decode failed for channel {audio.channels[i].audio.channel_id}")
                     elif 'users_connected' in str(data):

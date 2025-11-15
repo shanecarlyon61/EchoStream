@@ -725,6 +725,38 @@ def start_transmission_for_channel(audio_stream: AudioStream) -> bool:
     if pa_instance is None:
         return False
     
+    # Check if transmission is already started
+    if audio_stream.transmitting:
+        # Check if streams are still valid
+        try:
+            if audio_stream.input_stream and audio_stream.input_stream.is_active():
+                # Already running, no need to restart
+                return True
+        except Exception:
+            # Stream is invalid, need to recreate
+            pass
+        
+        # Clean up old streams if they exist but are invalid
+        if audio_stream.input_stream:
+            try:
+                if audio_stream.input_stream.is_active():
+                    audio_stream.input_stream.stop_stream()
+                audio_stream.input_stream.close()
+            except Exception:
+                pass
+            audio_stream.input_stream = None
+        
+        if audio_stream.output_stream:
+            try:
+                if audio_stream.output_stream.is_active():
+                    audio_stream.output_stream.stop_stream()
+                audio_stream.output_stream.close()
+            except Exception:
+                pass
+            audio_stream.output_stream = None
+        
+        audio_stream.transmitting = False
+    
     audio_stream.device_index = get_device_for_channel(audio_stream.channel_id)
     
     try:
@@ -755,7 +787,7 @@ def start_transmission_for_channel(audio_stream: AudioStream) -> bool:
             )
             audio_stream.output_stream.start_stream()
         except Exception as e:
-            print(f"Output stream failed, using input-only mode: {e}")
+            print(f"Output stream failed for channel {audio_stream.channel_id}, using input-only mode: {e}")
             audio_stream.output_stream = None
         
         audio_stream.transmitting = True
@@ -779,7 +811,21 @@ def start_transmission_for_channel(audio_stream: AudioStream) -> bool:
         print(f"Audio transmission started for channel {audio_stream.channel_id}")
         return True
     except Exception as e:
-        print(f"Failed to start transmission: {e}")
+        print(f"Failed to start transmission for channel {audio_stream.channel_id}: {e}")
+        # Clean up on failure
+        if audio_stream.input_stream:
+            try:
+                audio_stream.input_stream.close()
+            except Exception:
+                pass
+            audio_stream.input_stream = None
+        if audio_stream.output_stream:
+            try:
+                audio_stream.output_stream.close()
+            except Exception:
+                pass
+            audio_stream.output_stream = None
+        audio_stream.transmitting = False
         return False
 
 def setup_channel(ctx: ChannelContext, channel_id: str) -> bool:

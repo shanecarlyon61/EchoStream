@@ -208,6 +208,19 @@ def gpio_monitor_worker(arg=None):
                     if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[0]:
                         audio.channels[i].audio.gpio_active = 1 if curr_val_38 == 0 else 0
                         print(f"Channel {global_channel_ids[0]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                        
+                        # If GPIO becomes active and UDP is ready, start transmission if not already started
+                        if curr_val_38 == 0:  # GPIO is active
+                            import udp
+                            if udp.global_udp_socket and udp.global_server_addr:
+                                if not audio.channels[i].audio.transmitting:
+                                    print(f"[GPIO] Starting transmission for channel {global_channel_ids[0]} (GPIO active, UDP ready)")
+                                    # Check if key is already set
+                                    if any(audio.channels[i].audio.key):
+                                        if audio.start_transmission_for_channel(audio.channels[i].audio):
+                                            print(f"[GPIO] Transmission started for channel {global_channel_ids[0]}")
+                                        else:
+                                            print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[0]}")
                         break
                 
                 import websocket
@@ -221,6 +234,19 @@ def gpio_monitor_worker(arg=None):
                     if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[1]:
                         audio.channels[i].audio.gpio_active = 1 if curr_val_40 == 0 else 0
                         print(f"Channel {global_channel_ids[1]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                        
+                        # If GPIO becomes active and UDP is ready, start transmission if not already started
+                        if curr_val_40 == 0:  # GPIO is active
+                            import udp
+                            if udp.global_udp_socket and udp.global_server_addr:
+                                if not audio.channels[i].audio.transmitting:
+                                    print(f"[GPIO] Starting transmission for channel {global_channel_ids[1]} (GPIO active, UDP ready)")
+                                    # Check if key is already set
+                                    if any(audio.channels[i].audio.key):
+                                        if audio.start_transmission_for_channel(audio.channels[i].audio):
+                                            print(f"[GPIO] Transmission started for channel {global_channel_ids[1]}")
+                                        else:
+                                            print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[1]}")
                         break
                 
                 import websocket
@@ -234,6 +260,19 @@ def gpio_monitor_worker(arg=None):
                     if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[2]:
                         audio.channels[i].audio.gpio_active = 1 if curr_val_16 == 0 else 0
                         print(f"Channel {global_channel_ids[2]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                        
+                        # If GPIO becomes active and UDP is ready, start transmission if not already started
+                        if curr_val_16 == 0:  # GPIO is active
+                            import udp
+                            if udp.global_udp_socket and udp.global_server_addr:
+                                if not audio.channels[i].audio.transmitting:
+                                    print(f"[GPIO] Starting transmission for channel {global_channel_ids[2]} (GPIO active, UDP ready)")
+                                    # Check if key is already set
+                                    if any(audio.channels[i].audio.key):
+                                        if audio.start_transmission_for_channel(audio.channels[i].audio):
+                                            print(f"[GPIO] Transmission started for channel {global_channel_ids[2]}")
+                                        else:
+                                            print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[2]}")
                         break
                 
                 import websocket
@@ -249,6 +288,19 @@ def gpio_monitor_worker(arg=None):
                         if audio.channels[i].active and audio.channels[i].audio.channel_id == global_channel_ids[3]:
                             audio.channels[i].audio.gpio_active = 1 if curr_val_18 == 0 else 0
                             print(f"Channel {global_channel_ids[3]} audio {'ENABLED' if audio.channels[i].audio.gpio_active else 'DISABLED'}")
+                            
+                            # If GPIO becomes active and UDP is ready, start transmission if not already started
+                            if curr_val_18 == 0:  # GPIO is active
+                                import udp
+                                if udp.global_udp_socket and udp.global_server_addr:
+                                    if not audio.channels[i].audio.transmitting:
+                                        print(f"[GPIO] Starting transmission for channel {global_channel_ids[3]} (GPIO active, UDP ready)")
+                                        # Check if key is already set
+                                        if any(audio.channels[i].audio.key):
+                                            if audio.start_transmission_for_channel(audio.channels[i].audio):
+                                                print(f"[GPIO] Transmission started for channel {global_channel_ids[3]}")
+                                            else:
+                                                print(f"[GPIO] Failed to start transmission for channel {global_channel_ids[3]}")
                             break
                     
                     import websocket
