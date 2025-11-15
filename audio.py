@@ -495,23 +495,25 @@ def audio_output_worker(audio_stream: AudioStream):
                         # Wait a bit more to allow buffer to fill to minimum threshold
                         time.sleep(0.02)  # Wait 20ms for more packets
                         continue  # Skip this iteration, try again next loop
-                    else:
-                        if jitter_frames == 0:
-                            # Buffer was full but now empty - underrun condition
-                            # Match C: fill with silence but log the underrun
-                            static_underrun_count = getattr(audio_output_worker, '_underrun_count', {})
-                            if audio_stream.channel_id not in static_underrun_count:
-                                static_underrun_count[audio_stream.channel_id] = 0
-                            static_underrun_count[audio_stream.channel_id] += 1
-                            audio_output_worker._underrun_count = static_underrun_count
-                            
-                            if static_underrun_count[audio_stream.channel_id] == 1:
-                                print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer empty! (read_idx={audio_stream.output_jitter.read_index}, write_idx={audio_stream.output_jitter.write_index})")
-                            elif static_underrun_count[audio_stream.channel_id] % 500 == 0:
-                                print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer still empty (underrun_count={static_underrun_count[audio_stream.channel_id]})")
-                            # Continue to fill with silence (match C behavior - always fill buffer)
-                    else:
-                        # Buffer has frames - mark that we've had frames
+                    
+                    # Handle underrun or normal playback
+                    if jitter_frames == 0 and audio_output_worker._has_had_frames.get(audio_stream.channel_id, False):
+                        # Buffer was full but now empty - underrun condition
+                        # Match C: fill with silence but log the underrun
+                        static_underrun_count = getattr(audio_output_worker, '_underrun_count', {})
+                        if audio_stream.channel_id not in static_underrun_count:
+                            static_underrun_count[audio_stream.channel_id] = 0
+                        static_underrun_count[audio_stream.channel_id] += 1
+                        audio_output_worker._underrun_count = static_underrun_count
+                        
+                        if static_underrun_count[audio_stream.channel_id] == 1:
+                            print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer empty! (read_idx={audio_stream.output_jitter.read_index}, write_idx={audio_stream.output_jitter.write_index})")
+                        elif static_underrun_count[audio_stream.channel_id] % 500 == 0:
+                            print(f"[JITTER UNDERRUN] Channel {audio_stream.channel_id}: Buffer still empty (underrun_count={static_underrun_count[audio_stream.channel_id]})")
+                        # Continue to fill with silence (match C behavior - always fill buffer)
+                    
+                    # Mark that we've had frames (for future underrun detection)
+                    if jitter_frames > 0:
                         if not hasattr(audio_output_worker, '_has_had_frames'):
                             audio_output_worker._has_had_frames = {}
                         if audio_stream.channel_id not in audio_output_worker._has_had_frames:
