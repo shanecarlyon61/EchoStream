@@ -135,20 +135,26 @@ def start_stream(stream: AudioStream, pa_instance: pyaudio.PyAudio) -> bool:
         # Check if device index is valid
         device_info = pa_instance.get_device_info_by_index(stream.device_index)
         
-        # Create input stream
-        stream.input_stream = pa_instance.open(
-            format=pyaudio.paFloat32,
-            channels=1,
-            rate=SAMPLE_RATE,
-            input=True,
-            input_device_index=stream.device_index,
-            frames_per_buffer=1024,
-            stream_callback=None  # We'll use blocking I/O
-        )
-        stream.input_stream.start_stream()
-        print(f"[AUDIO_STREAM] Input stream started for channel {stream.channel_id}")
+        # Create input stream (required for transmission, but continue if it fails)
+        try:
+            stream.input_stream = pa_instance.open(
+                format=pyaudio.paFloat32,
+                channels=1,
+                rate=SAMPLE_RATE,
+                input=True,
+                input_device_index=stream.device_index,
+                frames_per_buffer=1024,
+                stream_callback=None  # We'll use blocking I/O
+            )
+            stream.input_stream.start_stream()
+            print(f"[AUDIO_STREAM] Input stream started for channel {stream.channel_id}")
+        except Exception as e:
+            print(f"[AUDIO_STREAM] WARNING: Input stream failed for {stream.channel_id}: {e}")
+            stream.input_stream = None
+            # Continue anyway - output stream is more important for receiving audio
         
-        # Create output stream (optional, may fail)
+        # Create output stream (CRITICAL - needed for audio playback)
+        # This should always succeed if device supports output
         try:
             stream.output_stream = pa_instance.open(
                 format=pyaudio.paFloat32,
@@ -160,10 +166,12 @@ def start_stream(stream: AudioStream, pa_instance: pyaudio.PyAudio) -> bool:
                 stream_callback=None
             )
             stream.output_stream.start_stream()
-            print(f"[AUDIO_STREAM] Output stream started for channel {stream.channel_id}")
+            print(f"[AUDIO_STREAM] ✅ Output stream started for channel {stream.channel_id} (device {stream.device_index})")
         except Exception as e:
-            print(f"[AUDIO_STREAM] WARNING: Output stream failed for {stream.channel_id}, using input-only mode: {e}")
+            print(f"[AUDIO_STREAM] ❌ ERROR: Output stream FAILED for {stream.channel_id} (device {stream.device_index}): {e}")
+            print(f"[AUDIO_STREAM] This channel will NOT be able to play received audio!")
             stream.output_stream = None
+            # Don't fail completely - other channels might work
         
         stream.transmitting = True
         print(f"[AUDIO_STREAM] Audio transmission started for channel {stream.channel_id}")

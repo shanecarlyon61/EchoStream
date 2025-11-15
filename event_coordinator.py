@@ -229,18 +229,31 @@ def handle_udp_ready(udp_config: Dict[str, Any]):
                 
                 udp_manager.set_packet_receive_callback(handle_udp_packet)
                 
-                # Start transmission for channels with active GPIO
+                # Start output workers for ALL channels (so they can play audio from jitter buffer)
+                # Output should always be running - plays silence if jitter buffer is empty,
+                # plays audio when packets arrive
+                print("[EVENT] Starting output workers for all channels...")
                 all_channels = channel_manager.get_all_channels()
                 
                 for channel_id in all_channels:
                     ctx = channel_manager.get_channel(channel_id)
-                    if ctx and ctx.audio and ctx.audio.gpio_active:
-                        # Start transmission if not already started
+                    if ctx and ctx.audio:
+                        # Start output worker if not already started (output always runs)
                         if not ctx.audio.transmitting:
+                            # Start streams and workers
                             channel_manager.start_channel(channel_id)
-                        
-                        # Send transmit_started to server
+                            print(f"[EVENT] Started output for channel {channel_id}")
+                        else:
+                            # Output already started
+                            print(f"[EVENT] Output already running for channel {channel_id}")
+                
+                # Send transmit_started for channels with active GPIO
+                for channel_id in all_channels:
+                    ctx = channel_manager.get_channel(channel_id)
+                    if ctx and ctx.audio and ctx.audio.gpio_active:
+                        # Send transmit_started to server (indicates we're ready to transmit)
                         websocket_client.send_transmit_event(channel_id, True)
+                        print(f"[EVENT] Sent transmit_started for channel {channel_id} (GPIO active)")
             else:
                 print("[EVENT] ERROR: Failed to setup UDP")
     except ImportError as e:
