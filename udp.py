@@ -37,15 +37,27 @@ def setup_global_udp(config: dict) -> bool:
     
     try:
         global_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        
+        # Enable socket reuse (allows binding to same port if needed)
+        global_udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # Get local port info (socket gets assigned a port when we send)
         global_server_addr = (config['udp_host'], config['udp_port'])
         
         print(f"Global UDP socket configured for {config['udp_host']}:{config['udp_port']}")
         
-        # Send immediate heartbeat to establish connection
+        # Send immediate heartbeat to establish connection (this assigns a local port)
         heartbeat_msg = b'{"type":"KEEP_ALIVE"}'
         try:
             global_udp_socket.sendto(heartbeat_msg, global_server_addr)
             print("Initial heartbeat sent immediately upon UDP connection")
+            
+            # Get local port info after sending (like C implementation)
+            try:
+                local_addr = global_udp_socket.getsockname()
+                print(f"[UDP] Socket local address: {local_addr[0]}:{local_addr[1]}")
+            except Exception as e:
+                print(f"[UDP] Could not get local socket info: {e}")
         except Exception as e:
             print(f"Initial heartbeat error: {e}")
         
@@ -102,12 +114,19 @@ def udp_listener_worker(arg=None):
         print("UDP Listener: ERROR - Invalid socket")
         return None
     
-    print(f"Listening on UDP socket...")
+    print(f"Listening on UDP socket (timeout=0.1s)...")
+    print(f"[UDP] Socket details: {global_udp_socket}")
+    if global_server_addr:
+        print(f"[UDP] Server address: {global_server_addr}")
     
     udp_debug_count = 0
     
     packet_count = 0
     timeout_count = 0
+    last_packet_time = time.time()
+    
+    # Log initial state
+    print(f"[UDP] Listener started, waiting for packets...")
     
     while not global_interrupted.is_set():
         try:
@@ -117,9 +136,12 @@ def udp_listener_worker(arg=None):
             buffer, client_addr = global_udp_socket.recvfrom(8192)
             
             packet_count += 1
+            last_packet_time = time.time()
             
-            # Log first few packets and then occasionally
-            if packet_count <= 5 or packet_count % 500 == 0:
+            # Log ALL packets initially (first 20), then occasionally
+            if packet_count <= 20:
+                print(f"[UDP RX] Received packet #{packet_count} from {client_addr} ({len(buffer)} bytes)")
+            elif packet_count % 500 == 0:
                 print(f"[UDP RX] Received packet #{packet_count} from {client_addr} ({len(buffer)} bytes)")
             
             timeout_count = 0  # Reset timeout count on successful receive
@@ -222,8 +244,11 @@ def udp_listener_worker(arg=None):
         except socket.timeout:
             # Timeout is expected, continue loop
             timeout_count += 1
-            if timeout_count % 1000 == 0:  # Log every 100 timeouts (~10 seconds)
-                print(f"[UDP] Timeout waiting for packets (timeout_count={timeout_count}, packets_received={packet_count})")
+            # Log timeouts more frequently initially, then occasionally
+            if timeout_count <= 50 or timeout_count % 500 == 0:
+                time_since_last = time.time() - last_packet_time if packet_count > 0 else float('inf')
+                print(f"[UDP] Timeout waiting for packets (timeout_count={timeout_count}, packets_received={packet_count}, "
+                      f"time_since_last_packet={time_since_last:.2f}s)")
             continue
         except Exception as e:
             if not global_interrupted.is_set():
