@@ -544,9 +544,6 @@ def audio_output_worker(audio_stream: AudioStream):
                         
                         # Use the filled buffer (will contain audio + silence if buffer ran out)
                         samples_to_play = output_buffer
-                
-                # Always use the filled buffer (will contain audio + silence if buffer ran out)
-                samples_to_play = output_buffer
             
             # Play audio (gain already applied during buffer fill)
             # Rate-limit output to match playback rate (48kHz: 1024 samples = ~21.3ms)
