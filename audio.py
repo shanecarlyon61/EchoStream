@@ -115,7 +115,8 @@ def setup_audio_for_channel(audio_stream: AudioStream) -> bool:
         audio_stream.input_buffer = np.zeros(4800, dtype=np.float32)
         audio_stream.input_buffer_pos = 0
         audio_stream.current_output_frame_pos = 0
-        audio_stream.gpio_active = False
+        # Don't reset gpio_active here - let GPIO monitor worker handle it
+        # gpio_active will be set by GPIO monitor worker based on actual pin state
         
         return True
     except Exception as e:
