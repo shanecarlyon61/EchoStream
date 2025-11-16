@@ -47,7 +47,9 @@ import asyncio
 import json
 import threading
 from typing import Optional, Dict, Any, Callable, List
-from echostream import global_interrupted, MAX_CHANNELS
+
+# Local interruption flag (replaces dependency on removed echostream module)
+global_interrupted = threading.Event()
 
 global_ws_client: Optional[websockets.WebSocketClientProtocol] = None
 
