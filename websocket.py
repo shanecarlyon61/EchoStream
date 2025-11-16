@@ -123,13 +123,19 @@ async def websocket_handler():
                 
                 message_count += 1
                 
-                # Log all WebSocket messages (show all short messages, occasionally for long ones)
-                if len(str(message)) < 200:
-                    # Show all short messages (like empty messages or small notifications)
-                    print(f"[WEBSOCKET] Message #{message_count}: {message}")
-                elif message_count % 50 == 0:
-                    # Log longer messages occasionally (every 50th message)
-                    print(f"[WEBSOCKET] Message #{message_count}: {message[:200]}...")
+                # Always log users_connected raw messages so operator can see user presence activity
+                if "users_connected" in message:
+                    print("=" * 60)
+                    print(f"[WEBSOCKET] Users Connected (raw) Message #{message_count}:")
+                    # Print up to 500 chars to avoid log spam while still being useful
+                    print(f"{message[:500]}")
+                    print("=" * 60)
+                else:
+                    # Log other WebSocket messages (show all short messages, occasionally for long ones)
+                    if len(str(message)) < 200:
+                        print(f"[WEBSOCKET] Message #{message_count}: {message}")
+                    elif message_count % 50 == 0:
+                        print(f"[WEBSOCKET] Message #{message_count}: {message[:200]}...")
                 
                 try:
                     # Handle empty messages
@@ -188,43 +194,41 @@ async def websocket_handler():
                                 total_users = users_data.get('total', 0)
                                 connected_users = users_data.get('connected', [])
                                 
-                                # Log when users connect/disconnect
-                                if count == 1:
-                                    print("=" * 60)
-                                    print("[WEBSOCKET] Users Connected Event (first occurrence):")
-                                    print(f"  Total users: {total_users}")
-                                    if connected_users:
-                                        print(f"  Connected users: {len(connected_users)}")
-                                        for idx, user in enumerate(connected_users[:5]):  # Show first 5
-                                            user_id = user.get('id', user.get('user_id', 'Unknown'))
-                                            print(f"    User {idx + 1}: {user_id}")
-                                        if len(connected_users) > 5:
-                                            print(f"    ... and {len(connected_users) - 5} more")
-                                    print(f"  Message: {message[:200]}")
-                                    print("=" * 60)
-                                else:
-                                    # Log when new users connect (every message)
-                                    print(f"[WEBSOCKET] 👥 Users Connected Event #{count}: {total_users} total user(s) online")
-                                    if connected_users and len(connected_users) > 0:
-                                        print(f"  📡 Active connections: {len(connected_users)}")
+                                # Always log users_connected in a consistent, high-signal format
+                                print("=" * 60)
+                                print(f"[WEBSOCKET] Users Connected Event #{count}:")
+                                print(f"  Total users: {total_users}")
+                                if isinstance(connected_users, list) and connected_users:
+                                    print(f"  Connected users: {len(connected_users)}")
+                                    # Show top few entries to confirm identities
+                                    for idx, user in enumerate(connected_users[:5]):
+                                        user_id = (user.get('id')
+                                                   or user.get('user_id')
+                                                   or user.get('name')
+                                                   or user.get('user_name')
+                                                   or 'Unknown')
+                                        print(f"    User {idx + 1}: {user_id}")
+                                    if len(connected_users) > 5:
+                                        print(f"    ... and {len(connected_users) - 5} more")
+                                print("=" * 60)
                         except Exception:
                             # Fallback if parsing fails
-                            if count == 1:
                                 print("=" * 60)
-                                print("[WEBSOCKET] Users Connected Message (first occurrence):")
+                                print("[WEBSOCKET] Users Connected Message (unparsed fallback):")
                                 print(f"  Message: {message[:200]}")
-                                print(f"  Parsed Data: {json.dumps(data, indent=2)[:500]}")
+                                try:
+                                    print(f"  Parsed Data: {json.dumps(data, indent=2)[:500]}")
+                                except Exception:
+                                    pass
                                 print("=" * 60)
-                            else:
-                                print(f"[WEBSOCKET] 👥 Users connected message #{count} received")
                         
                         # Show UDP status
                         if udp.global_udp_socket and udp.global_server_addr:
-                            if count == 1:
-                                print("[WEBSOCKET] ✅ UDP is configured and ready for audio")
+                                if count == 1:
+                                    print("[WEBSOCKET] ✅ UDP is configured and ready for audio")
                         else:
-                            if count == 1:
-                                print("[WEBSOCKET] ⏳ UDP configuration pending")
+                                if count == 1:
+                                    print("[WEBSOCKET] ⏳ UDP configuration pending")
                     else:
                         # Log other messages occasionally
                         if message_count % 50 == 0:
