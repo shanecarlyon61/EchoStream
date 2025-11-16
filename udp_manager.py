@@ -257,7 +257,6 @@ def udp_listener_worker():
         print(f"[UDP] WARNING: Could not get socket info: {e}")
     
     packet_count = 0
-    first_recv_attempt = True
     
     while not global_interrupted.is_set():
         if global_udp_socket is None:
@@ -265,10 +264,6 @@ def udp_listener_worker():
             continue
         
         try:
-            if first_recv_attempt:
-                print(f"[UDP] Blocking on recvfrom() - waiting for packets...")
-                first_recv_attempt = False
-            
             result = receive_audio_packet()
             
             if result:
