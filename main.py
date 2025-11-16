@@ -1,3 +1,23 @@
+import sys
+from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio
+
+
+def main() -> int:
+    print("[MAIN] GPIO monitor starting...")
+    if not init_gpio(0):
+        print("[MAIN] Failed to initialize GPIO (chip 0)")
+        return 1
+    try:
+        monitor_gpio(poll_interval=0.1, status_every=100)
+    finally:
+        cleanup_gpio()
+        print("[MAIN] GPIO monitor stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
 
 import signal
 import sys
