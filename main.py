@@ -45,14 +45,21 @@ def main() -> int:
                 send_transmit_event(ch_id, True)
             elif state == 1:
                 send_transmit_event(ch_id, False)
-        # Proactively register channels for GPIOs that are already ACTIVE at startup
+        # Proactively check all configured channels against current GPIO states and connect ACTIVE ones
         from gpio_monitor import gpio_states
-        for gpio_num, state in list(gpio_states.items()):
+        print("[MAIN] Evaluating GPIO states for initial channel connections...")
+        for idx, gpio_num in enumerate(gpio_keys):
+            ch_id = gpio_to_channel.get(gpio_num)
+            if not ch_id:
+                continue
+            state = gpio_states.get(gpio_num, -1)
+            status = "ACTIVE" if state == 0 else ("INACTIVE" if state == 1 else "UNKNOWN")
+            print(f"[MAIN] Channel {idx + 1} ({ch_id}) mapped to GPIO {gpio_num}: {status}")
             if state == 0:
-                ch_id = gpio_to_channel.get(gpio_num)
-                if ch_id:
-                    request_register_channel(ch_id)
-                    send_transmit_event(ch_id, True)
+                print(f"[MAIN] Connecting ACTIVE channel {ch_id} via WebSocket")
+                request_register_channel(ch_id)
+                send_transmit_event(ch_id, True)
+        print("[MAIN] Initial channel connection evaluation complete")
         monitor_gpio(poll_interval=0.1, status_every=100, on_change=_on_gpio_change)
     finally:
         cleanup_gpio()
