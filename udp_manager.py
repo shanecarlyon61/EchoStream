@@ -108,6 +108,7 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
         return None
     
     try:
+        print(f"[UDP] socket_to_use: {socket_to_use}")
         data, addr = socket_to_use.recvfrom(8192)
         
         if not hasattr(receive_audio_packet, '_first_receive_logged'):
@@ -260,6 +261,10 @@ def udp_listener_worker():
             continue
         
         try:
+            if first_recv_attempt:
+                print(f"[UDP] Blocking on recvfrom() - waiting for packets...")
+                first_recv_attempt = False
+            
             result = receive_audio_packet()
             
             if result:
