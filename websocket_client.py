@@ -14,6 +14,7 @@ global_interrupted = threading.Event()
 _audio_streams_by_channel: Dict[int, Dict[str, object]] = {}  # channel_index -> {'pa': pa, 'stream': stream}
 _udp_transport = None
 _udp_listening_port: Optional[int] = None
+_udp_task: Optional[asyncio.Task] = None
 
 try:
     from audio_devices import select_output_device_for_channel, open_output_stream, close_stream
@@ -394,24 +395,30 @@ class _UDPProtocol(asyncio.DatagramProtocol):
     def connection_lost(self, exc):
         print("[UDP] Async UDP listener stopped")
 
-def _start_async_udp_listener(loop: asyncio.AbstractEventLoop, udp_port: int, host_hint: str = "") -> None:
+async def _async_start_udp_listener(loop: asyncio.AbstractEventLoop, udp_port: int, host_hint: str = "") -> None:
     global _udp_transport, _udp_listening_port
+    if _udp_transport is not None and _udp_listening_port == udp_port:
+        return
+    if _udp_transport is not None:
+        try:
+            _udp_transport.close()
+        except Exception:
+            pass
+        _udp_transport = None
+    transport, _ = await loop.create_datagram_endpoint(_UDPProtocol, local_addr=('0.0.0.0', int(udp_port)))
+    _udp_transport = transport
+    _udp_listening_port = udp_port
+    print(f"[UDP] Listening for audio on 0.0.0.0:{udp_port} (server={host_hint})")
+
+def _start_async_udp_listener(loop: asyncio.AbstractEventLoop, udp_port: int, host_hint: str = "") -> None:
+    global _udp_task
     try:
-        if _udp_transport is not None and _udp_listening_port == udp_port:
+        if udp_port <= 0:
             return
-        if _udp_transport is not None:
-            try:
-                _udp_transport.close()
-            except Exception:
-                pass
-            _udp_transport = None
-        listen = loop.create_datagram_endpoint(_UDPProtocol, local_addr=('0.0.0.0', int(udp_port)))
-        transport, _ = loop.run_until_complete(listen)
-        _udp_transport = transport
-        _udp_listening_port = udp_port
-        print(f"[UDP] Listening for audio on 0.0.0.0:{udp_port} (server={host_hint})")
+        # schedule on the running loop
+        _udp_task = loop.create_task(_async_start_udp_listener(loop, udp_port, host_hint))
     except Exception as e:
-        print(f"[UDP] ERROR: Failed to start async UDP listener on {udp_port}: {e}")
+        print(f"[UDP] ERROR: Failed to schedule async UDP listener on {udp_port}: {e}")
 
 async def websocket_handler_async():
     global global_ws_client, ws_connected

@@ -3,7 +3,6 @@ from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio, GPIO_PINS
 from config import load_config, get_channel_ids, get_tone_detect_config
 from websocket_client import start_websocket
 from websocket_client import set_udp_config_callback
-from udp_player import global_udp_player
 
 
 def main() -> int:
@@ -25,7 +24,7 @@ def main() -> int:
     # Start WS without auto-register; GPIO activity will trigger channel registration
     start_websocket("wss://audio.redenes.org/ws/", ch_ids)
 
-    # When UDP connection info arrives from WS, start the UDP audio listener
+    # When UDP connection info arrives from WS, just log; the WS thread now starts its own UDP listener
     def _on_udp_ready(cfg: dict) -> None:
         try:
             udp_port = int(cfg.get("udp_port", 0) or 0)
@@ -33,10 +32,9 @@ def main() -> int:
             if udp_port <= 0:
                 print(f"[MAIN] WARNING: Invalid UDP port in config: {cfg}")
                 return
-            if global_udp_player.start(udp_port=udp_port, host_hint=udp_host):
-                print(f"[MAIN] UDP listener started on port {udp_port}")
+            print(f"[MAIN] UDP config received: host={udp_host}, port={udp_port}")
         except Exception as e:
-            print(f"[MAIN] ERROR: Failed to start UDP listener: {e}")
+            print(f"[MAIN] ERROR: UDP config handling failed: {e}")
 
     set_udp_config_callback(_on_udp_ready)
 
