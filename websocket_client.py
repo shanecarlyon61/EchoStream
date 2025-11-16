@@ -283,12 +283,24 @@ async def websocket_handler_async():
 
                 message_count += 1
 
+                # If the raw message mentions users_connected, always log it,
+                # even if JSON parsing fails or the structure is unexpected.
+                if "users_connected" in message:
+                    print("=" * 60)
+                    print("[WEBSOCKET] Raw users_connected message detected:")
+                    print(f"  Raw message: {message[:500]}")
+                    print("=" * 60)
+
                 try:
                     data = json.loads(message)
-                except json.JSONDecodeError:
-
+                except json.JSONDecodeError as e:
+                    # Already logged above if it contained users_connected; otherwise log basic error.
+                    if "users_connected" not in message:
+                        print(f"[WEBSOCKET] JSON decode error: {e}")
+                        print(f"[WEBSOCKET] Message content: {message[:200]}")
                     continue
 
+                # Handle UDP configuration messages first
                 udp_config = parse_udp_config(message)
                 if udp_config:
                     if udp_config_callback:
@@ -298,7 +310,8 @@ async def websocket_handler_async():
                             print(f"[WEBSOCKET] ERROR: Exception in UDP config callback: {e}")
                     continue
 
-                if 'users_connected' in str(data):
+                # Handle users_connected messages regardless of structure
+                if "users_connected" in str(data):
                     handle_users_connected(data)
                     continue
 
