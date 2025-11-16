@@ -2,6 +2,7 @@ import socket
 import threading
 import base64
 import json
+import os
 from typing import Dict, Optional, List, Tuple
 
 from audio_devices import (
@@ -36,6 +37,9 @@ class UDPPlayer:
         self._aesgcm: Optional[AESGCM] = None
         self._opus_decoder = None
         self._channel_ids: List[str] = []
+        self._server_addr: Optional[Tuple[str, int]] = None
+        self._hb_thread: Optional[threading.Thread] = None
+        self._hb_running = threading.Event()
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
         with self._lock:
@@ -104,7 +108,7 @@ class UDPPlayer:
         print("[UDP] Receiver thread started")
         while self._running.is_set():
             try:
-                data, _addr = self._sock.recvfrom(8192)  # nosec
+                data = self._sock.recv(8192)  # nosec
                 if not data:
                     continue
                 try:
@@ -141,13 +145,34 @@ class UDPPlayer:
                             stream.write(pcm)  # type: ignore[attr-defined]
                         except Exception as e:
                             print(f"[UDP] WARNING: write failed for channel index {ch_index}: {e}")
-            except OSError:
-                if self._running.is_set():
-                    print("[UDP] WARNING: socket error while running")
-                break
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if not self._running.is_set():
+                    break
+                print(f"[UDP] WARNING: socket error while running: {e}")
+                continue
             except Exception as e:
                 print(f"[UDP] ERROR: receiver loop exception: {e}")
         print("[UDP] Receiver thread exiting")
+
+    def _heartbeat_loop(self) -> None:
+        if not self._server_addr or not self._sock:
+            return
+        print("[UDP] Heartbeat thread started")
+        while self._hb_running.is_set():
+            try:
+                # Keep NAT mapping alive; server expects JSON KEEP_ALIVE
+                self._sock.send(b'{"type":"KEEP_ALIVE"}')  # nosec
+                try:
+                    la = self._sock.getsockname()
+                    print(f"[UDP] HEARTBEAT sent from {la} to {self._server_addr}")
+                except Exception:
+                    print("[UDP] HEARTBEAT sent")
+            except Exception:
+                pass
+            self._hb_running.wait(10.0)
+        print("[UDP] Heartbeat thread stopped")
 
     def start(self, udp_port: int, host_hint: str = "", aes_key_b64: str = "") -> bool:
         if self._sock is not None:
@@ -172,10 +197,42 @@ class UDPPlayer:
                 self._opus_decoder = None
 
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Bind locally to receive server audio; host_hint logged for debugging
-            self._sock.bind(("0.0.0.0", int(udp_port)))
             self._sock.settimeout(1.0)
-            print(f"[UDP] Listening for audio on 0.0.0.0:{udp_port} (server={host_hint})")
+
+            # Connect to server host:port using UDP so replies return to this socket.
+            # The OS picks an ephemeral local port that the server will reply to.
+            # Allow environment override for UDP host (useful when server advertises public IP but audio flows on overlay)
+            host_override = os.getenv("ES_UDP_HOST_OVERRIDE", "").strip()
+            host_used = host_override or host_hint
+            if not host_used:
+                print("[UDP] ERROR: No udp_host provided by server")
+                self.stop()
+                return False
+            self._server_addr = (host_used, int(udp_port))
+            try:
+                self._sock.connect(self._server_addr)
+            except Exception as e:
+                print(f"[UDP] ERROR: UDP connect failed to {self._server_addr}: {e}")
+                self.stop()
+                return False
+
+            # Immediate heartbeat to open the path
+            try:
+                self._sock.send(b'{"type":"KEEP_ALIVE"}')  # nosec
+                try:
+                    la = self._sock.getsockname()
+                    print(f"[UDP] Local addr: {la} -> {self._server_addr}")
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[UDP] WARNING: initial heartbeat failed: {e}")
+
+            # Start periodic heartbeat
+            self._hb_running.set()
+            self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+            self._hb_thread.start()
+
+            print(f"[UDP] Connected to server {host_used}:{udp_port} (ephemeral local port in use)")
             self._running.set()
             self._recv_thread = threading.Thread(target=self._receiver_loop, daemon=True)
             self._recv_thread.start()
@@ -188,6 +245,11 @@ class UDPPlayer:
     def stop(self) -> None:
         try:
             self._running.clear()
+            if self._hb_running.is_set():
+                self._hb_running.clear()
+            if self._hb_thread and self._hb_thread.is_alive():
+                self._hb_thread.join(timeout=1.0)
+            self._hb_thread = None
             if self._sock:
                 try:
                     self._sock.close()
