@@ -123,39 +123,43 @@ async def websocket_handler():
                 
                 message_count += 1
                 
+                # Normalize to text (server may send bytes or str)
+                message_text = (message.decode('utf-8', errors='replace')
+                                if isinstance(message, (bytes, bytearray)) else message)
+                
                 # Always log users_connected raw messages so operator can see user presence activity
-                if "users_connected" in message:
+                if "users_connected" in message_text:
                     print("=" * 60)
                     print(f"[WEBSOCKET] Users Connected (raw) Message #{message_count}:")
                     # Print up to 500 chars to avoid log spam while still being useful
-                    print(f"{message[:500]}")
+                    print(f"{message_text[:500]}")
                     print("=" * 60)
                 else:
                     # Log other WebSocket messages (show all short messages, occasionally for long ones)
-                    if len(str(message)) < 200:
-                        print(f"[WEBSOCKET] Message #{message_count}: {message}")
+                    if len(str(message_text)) < 200:
+                        print(f"[WEBSOCKET] Message #{message_count}: {message_text}")
                     elif message_count % 50 == 0:
-                        print(f"[WEBSOCKET] Message #{message_count}: {message[:200]}...")
+                        print(f"[WEBSOCKET] Message #{message_count}: {message_text[:200]}...")
                 
                 try:
                     # Handle empty messages
-                    if not message or len(message) == 0:
+                    if not message_text or len(message_text) == 0:
                         if message_count % 100 == 0:  # Log occasionally
                             print(f"[WEBSOCKET] Received empty message (#{message_count})")
                         continue
                     
-                    data = json.loads(message)
+                    data = json.loads(message_text)
                     
                     # Log full message content for important messages
                     if 'udp_host' in str(data) and 'udp_port' in str(data) and 'websocket_id' in str(data):
                         print("=" * 60)
                         print(f"[WEBSOCKET] UDP Connection Info Received:")
-                        print(f"  Message: {message}")
+                        print(f"  Message: {message_text}")
                         print(f"  Parsed Data: {json.dumps(data, indent=2)}")
                         print("=" * 60)
                         
                         # Parse the WebSocket configuration
-                    if parse_websocket_config(message, global_config):
+                        if parse_websocket_config(message_text, global_config):
                         print("Successfully parsed UDP connection info")
                         global_config_initialized = True
                         
@@ -215,7 +219,7 @@ async def websocket_handler():
                             # Fallback if parsing fails
                                 print("=" * 60)
                                 print("[WEBSOCKET] Users Connected Message (unparsed fallback):")
-                                print(f"  Message: {message[:200]}")
+                                print(f"  Message: {message_text[:200]}")
                                 try:
                                     print(f"  Parsed Data: {json.dumps(data, indent=2)[:500]}")
                                 except Exception:
