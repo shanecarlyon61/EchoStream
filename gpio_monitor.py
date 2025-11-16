@@ -122,7 +122,7 @@ def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100,
                         try:
                             on_change(gpio_num, val)
                         except Exception as e:
-                            print(f\"[GPIO] WARNING: on_change callback error for GPIO {gpio_num}: {e}\")
+                            print(f"[GPIO] WARNING: on_change callback error for GPIO {gpio_num}: {e}")
 
             count += 1
             if count >= status_every:
