@@ -5,12 +5,15 @@ import json
 import os
 import time
 import errno
+import numpy as np
 from typing import Dict, Optional, List, Tuple
 
 from audio_devices import (
     select_output_device_for_channel,
     open_output_stream,
     close_stream,
+    select_input_device_for_channel,
+    open_input_stream,
 )
 
 try:
@@ -34,8 +37,11 @@ class UDPPlayer:
         self._recv_thread: Optional[threading.Thread] = None
         self._running = threading.Event()
         self._streams: Dict[int, Dict[str, object]] = {}  # channel_index -> { 'pa': pa, 'stream': stream }
+        self._input_streams: Dict[int, Dict[str, object]] = {}  # channel_index -> { 'pa': pa, 'stream': stream, 'encoder': encoder, 'buffer': buffer, 'buffer_pos': int, 'thread': thread }
         self._lock = threading.Lock()
+        self._input_lock = threading.Lock()
         self._aesgcm: Optional[AESGCM] = None
+        self._aes_key: Optional[bytes] = None  # Store key for encryption
         self._opus_decoder = None
         self._channel_ids: List[str] = []
         self._server_addr: Optional[Tuple[str, int]] = None
@@ -43,6 +49,7 @@ class UDPPlayer:
         self._hb_running = threading.Event()
         self._hb_count = 0
         self._receive_count = 0  # Track received packets for logging
+        self._transmitting: Dict[int, bool] = {}  # channel_index -> transmitting state
         # If ES_UDP_HEARTBEAT_LOG=0, completely suppress heartbeat logs
         self._suppress_hb_log = os.getenv("ES_UDP_HEARTBEAT_LOG", "1") == "0"
 
@@ -103,9 +110,8 @@ class UDPPlayer:
             return None
         try:
             pcm = self._opus_decoder.decode(data, frame_size=1920, decode_fec=0)  # type: ignore[attr-defined]
-            import array
-            arr = array.array("h", pcm)  # type: ignore[arg-type]
-            return arr.tobytes()
+            # Convert to bytes directly (opuslib returns bytes)
+            return pcm if isinstance(pcm, bytes) else bytes(pcm)
         except Exception:
             return None
 
@@ -266,11 +272,13 @@ class UDPPlayer:
                     key = base64.b64decode(key_b64_to_use)
                     if len(key) == 32:  # AES-256 requires 32 bytes
                         self._aesgcm = AESGCM(key)
+                        self._aes_key = key  # Store key for encryption
                         key_source = 'server' if (aes_key_b64 and aes_key_b64 not in ("", "N/A")) else 'hardcoded'
                         print(f"[UDP] AES key initialized (using {key_source} key)")
                     else:
                         print(f"[UDP] WARNING: AES key length invalid: {len(key)} bytes (expected 32)")
                         self._aesgcm = None
+                        self._aes_key = None
                 except Exception as e:
                     print(f"[UDP] WARNING: AES key init failed: {e}")
                     self._aesgcm = None
@@ -336,6 +344,243 @@ class UDPPlayer:
             self.stop()
             return False
 
+    def _close_all_input_streams(self) -> None:
+        with self._input_lock:
+            for ch_idx, bundle in list(self._input_streams.items()):
+                thread = bundle.get("thread")
+                if thread and thread.is_alive():
+                    # Thread will check _running and exit
+                    pass
+                pa = bundle.get("pa")
+                stream = bundle.get("stream")
+                if pa and stream:
+                    close_stream(pa, stream)
+                encoder = bundle.get("encoder")
+                if encoder and HAS_OPUS:
+                    try:
+                        encoder.destroy()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+            self._input_streams.clear()
+
+    def _audio_input_worker(self, channel_index: int, channel_id: str) -> None:
+        """Audio input worker thread - captures audio and sends it via UDP"""
+        print(f"[AUDIO TX] Input worker started for channel {channel_id} (index {channel_index})")
+        
+        bundle = self._input_streams.get(channel_index)
+        if not bundle:
+            print(f"[AUDIO TX] ERROR: No input stream bundle for channel {channel_index}")
+            return
+        
+        stream = bundle.get("stream")
+        encoder = bundle.get("encoder")
+        input_buffer = bundle.get("buffer")
+        buffer_pos_key = "buffer_pos"
+        
+        if not stream or not encoder or input_buffer is None:
+            print(f"[AUDIO TX] ERROR: Missing stream/encoder/buffer for channel {channel_index}")
+            return
+        
+        send_count = 0
+        read_count = 0
+        
+        while self._running.is_set() and self._transmitting.get(channel_index, False):
+            # Check GPIO state - only send when GPIO is active (value 0)
+            try:
+                from gpio_monitor import GPIO_PINS, gpio_states
+                gpio_keys = list(GPIO_PINS.keys())
+                if channel_index < len(gpio_keys):
+                    gpio_num = gpio_keys[channel_index]
+                    gpio_state = gpio_states.get(gpio_num, -1)
+                    if gpio_state != 0:  # GPIO not active
+                        time.sleep(0.1)
+                        continue
+            except Exception as e:
+                # If GPIO check fails, continue anyway (for testing)
+                if send_count % 100 == 0:
+                    print(f"[AUDIO TX] WARNING: GPIO check failed: {e}")
+            
+            try:
+                # Read audio data (1024 frames like C code)
+                data = stream.read(1024, exception_on_overflow=False)  # type: ignore[attr-defined]
+                if len(data) == 0:
+                    time.sleep(0.01)
+                    continue
+                
+                read_count += 1
+                # Convert bytes to float32 array
+                audio_data = np.frombuffer(data, dtype=np.float32)
+                
+                # Accumulate samples for 1920 samples (40ms at 48kHz)
+                for sample in audio_data:
+                    input_buffer[bundle[buffer_pos_key]] = sample
+                    bundle[buffer_pos_key] += 1
+                    
+                    if bundle[buffer_pos_key] >= 1920:
+                        # Convert to int16 PCM (like C code)
+                        pcm = (np.clip(input_buffer[:1920], -1.0, 1.0) * 32767.0).astype(np.int16)
+                        pcm_bytes = pcm.tobytes()
+                        
+                        # Encode with Opus (like C code: opus_encode(encoder, pcm, 1920, opus_data, sizeof(opus_data)))
+                        try:
+                            opus_data = encoder.encode(pcm_bytes, 1920)  # type: ignore[attr-defined]
+                            
+                            if opus_data and len(opus_data) > 0:
+                                # Encrypt with AES-256-GCM
+                                if self._aes_key and HAS_AES:
+                                    try:
+                                        # Generate random IV (12 bytes for GCM)
+                                        iv = os.urandom(12)
+                                        aesgcm_enc = AESGCM(self._aes_key)
+                                        encrypted = aesgcm_enc.encrypt(iv, opus_data, None)
+                                        
+                                        # Combine IV + ciphertext + tag (like C code)
+                                        # C code: IV (12) + CT + tag (16)
+                                        encrypted_with_iv = iv + encrypted
+                                        
+                                        # Base64 encode
+                                        b64_data = base64.b64encode(encrypted_with_iv).decode('utf-8')
+                                        
+                                        # Send via UDP (like C code)
+                                        if self._sock and self._server_addr:
+                                            msg = json.dumps({
+                                                "channel_id": channel_id,
+                                                "type": "audio",
+                                                "data": b64_data
+                                            })
+                                            self._sock.sendto(msg.encode('utf-8'), self._server_addr)  # nosec
+                                            
+                                            send_count += 1
+                                            if send_count <= 5 or send_count % 500 == 0:
+                                                print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
+                                                      f"({len(msg)} bytes) to {self._server_addr}")
+                                    except Exception as e:
+                                        if send_count <= 10:
+                                            print(f"[AUDIO TX ERROR] Channel {channel_id}: Encryption/send failed: {e}")
+                                else:
+                                    if send_count <= 10:
+                                        print(f"[AUDIO TX ERROR] Channel {channel_id}: No AES key available")
+                        except Exception as e:
+                            if send_count <= 10:
+                                print(f"[AUDIO TX ERROR] Channel {channel_id}: Opus encode failed: {e}")
+                        
+                        # Reset buffer position
+                        bundle[buffer_pos_key] = 0
+            except Exception as e:
+                if not self._running.is_set():
+                    break
+                if send_count % 100 == 0:
+                    print(f"[AUDIO TX] Input error for {channel_id}: {e}")
+                time.sleep(0.1)
+        
+        print(f"[AUDIO TX] Input worker stopped for channel {channel_id}")
+
+    def start_transmission_for_channel(self, channel_index: int) -> bool:
+        """Start audio transmission for a channel (like C code's start_transmission_for_channel)"""
+        if channel_index < 0 or channel_index >= len(self._channel_ids):
+            print(f"[AUDIO TX] ERROR: Invalid channel index {channel_index}")
+            return False
+        
+        channel_id = self._channel_ids[channel_index]
+        
+        with self._input_lock:
+            if channel_index in self._input_streams:
+                print(f"[AUDIO TX] Channel {channel_id} already transmitting")
+                self._transmitting[channel_index] = True
+                return True
+            
+            # Select input device
+            device_index = select_input_device_for_channel(channel_index)
+            if device_index is None:
+                print(f"[AUDIO TX] ERROR: No input device available for channel {channel_index}")
+                return False
+            
+            # Open input stream
+            pa, stream = open_input_stream(device_index, frames_per_buffer=1024)
+            if pa is None or stream is None:
+                print(f"[AUDIO TX] ERROR: Failed to open input stream for channel {channel_index}")
+                return False
+            
+            # Create Opus encoder (like C code)
+            encoder = None
+            if HAS_OPUS:
+                try:
+                    encoder = opuslib.Encoder(48000, 1, opuslib.APPLICATION_VOIP)  # type: ignore[attr-defined]
+                    encoder.bitrate = 64000  # type: ignore[attr-defined]
+                    encoder.vbr = True  # type: ignore[attr-defined]
+                except Exception as e:
+                    print(f"[AUDIO TX] ERROR: Opus encoder init failed for channel {channel_index}: {e}")
+                    close_stream(pa, stream)
+                    return False
+            else:
+                print("[AUDIO TX] ERROR: Opus library not available")
+                close_stream(pa, stream)
+                return False
+            
+            # Start input stream
+            try:
+                stream.start_stream()  # type: ignore[attr-defined]
+            except Exception as e:
+                print(f"[AUDIO TX] ERROR: Failed to start input stream: {e}")
+                close_stream(pa, stream)
+                if encoder:
+                    try:
+                        encoder.destroy()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                return False
+            
+            # Create input buffer (1920 samples like C code)
+            input_buffer = np.zeros(1920, dtype=np.float32)
+            
+            # Store bundle
+            bundle = {
+                "pa": pa,
+                "stream": stream,
+                "encoder": encoder,
+                "buffer": input_buffer,
+                "buffer_pos": 0,
+            }
+            self._input_streams[channel_index] = bundle
+            
+            # Start input worker thread
+            thread = threading.Thread(
+                target=self._audio_input_worker,
+                args=(channel_index, channel_id),
+                daemon=True
+            )
+            bundle["thread"] = thread
+            self._transmitting[channel_index] = True
+            thread.start()
+            
+            print(f"[AUDIO TX] Started transmission for channel {channel_id} (index {channel_index}, device {device_index})")
+            return True
+
+    def stop_transmission_for_channel(self, channel_index: int) -> None:
+        """Stop audio transmission for a channel"""
+        with self._input_lock:
+            if channel_index not in self._input_streams:
+                return
+            self._transmitting[channel_index] = False
+            bundle = self._input_streams.get(channel_index)
+            if bundle:
+                thread = bundle.get("thread")
+                if thread and thread.is_alive():
+                    thread.join(timeout=2.0)
+                pa = bundle.get("pa")
+                stream = bundle.get("stream")
+                if pa and stream:
+                    close_stream(pa, stream)
+                encoder = bundle.get("encoder")
+                if encoder and HAS_OPUS:
+                    try:
+                        encoder.destroy()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                del self._input_streams[channel_index]
+            if channel_index in self._transmitting:
+                del self._transmitting[channel_index]
+
     def stop(self) -> None:
         try:
             self._running.clear()
@@ -355,6 +600,7 @@ class UDPPlayer:
             self._recv_thread = None
         finally:
             self._close_all_streams()
+            self._close_all_input_streams()
             print("[UDP] Stopped")
 
 
