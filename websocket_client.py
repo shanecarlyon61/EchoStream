@@ -1,10 +1,7 @@
 import threading
 import asyncio
 import websockets
-import websockets
-import asyncio
 import json
-import threading
 from typing import Optional, Dict, Any, Callable, List
 
 # Local interruption flag (replaces dependency on removed echostream module)
@@ -49,7 +46,13 @@ async def connect_to_server_async(url: str) -> bool:
 
     try:
         print(f"[WEBSOCKET] Connecting to: {url}")
-        global_ws_client = await websockets.connect(url)
+        # Use same subprotocol as C client ("audio-protocol")
+        try:
+            global_ws_client = await websockets.connect(url, subprotocols=["audio-protocol"])
+        except TypeError:
+            # Fallback for very old websockets versions without subprotocols kw
+            print("[WEBSOCKET] WARNING: websockets library does not support 'subprotocols' argument, trying without.")
+            global_ws_client = await websockets.connect(url)
         ws_connected = True
         ws_url = url
         print("[WEBSOCKET] WebSocket connection established")
@@ -553,13 +556,29 @@ def global_websocket_thread(url: str):
             print("[WEBSOCKET] ERROR: Connection not established, thread exiting")
             return
 
+        print("[WEBSOCKET] WebSocket connection established - sending connect messages for all configured channels")
+        
         try:
-            # Connection established; register any queued channels immediately
+            # Connection established; send connect messages for ALL configured channels immediately (like C client)
+            # The C client sends connect messages for all channels[i].active (configured channels) right after connection
             if pending_register_ids:
-                print(f"[WEBSOCKET] Registering {len(pending_register_ids)} queued channel(s) after connect")
-                register_channels(list(pending_register_ids))
+                print(f"[WEBSOCKET] Sending connect messages for {len(pending_register_ids)} configured channel(s)")
+                for ch_id in list(pending_register_ids):
+                    if send_connect_message(ch_id):
+                        if ch_id not in registered_channels:
+                            registered_channels.append(ch_id)
+                        print(f"[WEBSOCKET] ✓ Connect message sent for channel {ch_id}")
+                    else:
+                        print(f"[WEBSOCKET] ✗ Failed to send connect message for channel {ch_id}")
+                # Clear pending list after sending
+                pending_register_ids.clear()
+                print(f"[WEBSOCKET] All connect messages sent. Registered channels: {registered_channels}")
+            else:
+                print("[WEBSOCKET] WARNING: No channels configured (pending_register_ids is empty)")
         except Exception as e:
-            print(f"[WEBSOCKET] WARNING: Failed to register channels: {e}")
+            print(f"[WEBSOCKET] ERROR: Failed to send connect messages: {e}")
+            import traceback
+            traceback.print_exc()
 
         ws_event_loop.run_until_complete(websocket_handler_async())
 
