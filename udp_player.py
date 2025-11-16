@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import time
+import errno
 from typing import Dict, Optional, List, Tuple
 
 from audio_devices import (
@@ -11,7 +12,6 @@ from audio_devices import (
     open_output_stream,
     close_stream,
 )
-from gpio_monitor import GPIO_PINS, gpio_states
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore
@@ -42,6 +42,7 @@ class UDPPlayer:
         self._hb_thread: Optional[threading.Thread] = None
         self._hb_running = threading.Event()
         self._hb_count = 0
+        self._receive_count = 0  # Track received packets for logging
         # If ES_UDP_HEARTBEAT_LOG=0, completely suppress heartbeat logs
         self._suppress_hb_log = os.getenv("ES_UDP_HEARTBEAT_LOG", "1") == "0"
 
@@ -112,49 +113,67 @@ class UDPPlayer:
         print("[UDP] Receiver thread started")
         while self._running.is_set():
             try:
-                data = self._sock.recv(8192)  # nosec
+                # Use recvfrom() like C code - receives from ANY address
+                # This is important because server may send from different IP/port
+                data, addr = self._sock.recvfrom(8192)  # nosec
+                
                 if not data:
                     continue
+                
+                # Log every 1000th packet (like C code does)
+                self._receive_count += 1
+                if self._receive_count % 1000 == 0:
+                    print(f"[UDP] Received {len(data)} bytes from {addr} (count: {self._receive_count})")
+                
                 try:
                     msg = json.loads(data.decode("utf-8", errors="ignore"))
                 except Exception:
                     continue
+                    
                 if not isinstance(msg, dict):
                     continue
+                    
                 if msg.get("type") != "audio":
                     continue
+                    
                 ch_id = str(msg.get("channel_id", "")).strip()
                 b64 = msg.get("data", "")
+                
                 if not ch_id or not b64:
                     continue
+                    
                 pcm = self._decrypt_and_decode(b64)
                 if not pcm:
                     continue
-                # Prefer explicit channel_id mapping; fallback to GPIO active mapping
+                    
+                # Find channel by channel_id (matching C code behavior)
                 target_index = self._map_channel_id_to_index(ch_id)
-                target_indices: List[int]
-                if target_index is not None:
-                    target_indices = [target_index]
-                else:
-                    # Fallback: mirror to all ACTIVE GPIO channels
-                    active_gpio = [g for g, val in gpio_states.items() if val == 0]
-                    gpio_keys: List[int] = list(GPIO_PINS.keys())
-                    target_indices = [gpio_keys.index(g) for g in active_gpio if g in gpio_keys]
-                for ch_index in target_indices:
-                    self._ensure_stream_for_channel(ch_index)
-                    bundle = self._streams.get(ch_index)
-                    if bundle and pcm:
-                        try:
-                            stream = bundle["stream"]
-                            stream.write(pcm)  # type: ignore[attr-defined]
-                        except Exception as e:
-                            print(f"[UDP] WARNING: write failed for channel index {ch_index}: {e}")
+                if target_index is None:
+                    # Debug: log when channel not found (like C code)
+                    if os.getenv("ES_UDP_DEBUG"):
+                        print(f"[UDP] No active channel found for '{ch_id}'")
+                        print(f"[UDP] Active channels: {self._channel_ids}")
+                    continue
+                    
+                self._ensure_stream_for_channel(target_index)
+                bundle = self._streams.get(target_index)
+                if bundle and pcm:
+                    try:
+                        stream = bundle["stream"]
+                        stream.write(pcm)  # type: ignore[attr-defined]
+                    except Exception as e:
+                        print(f"[UDP] WARNING: write failed for channel index {target_index}: {e}")
+                        
             except socket.timeout:
                 continue
             except OSError as e:
                 if not self._running.is_set():
                     break
-                print(f"[UDP] WARNING: socket error while running: {e}")
+                # Handle EAGAIN/EWOULDBLOCK like C code
+                if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
+                    # No data available - continue waiting
+                    continue
+                print(f"[UDP] WARNING: socket error: {e}")
                 continue
             except Exception as e:
                 print(f"[UDP] ERROR: receiver loop exception: {e}")
@@ -166,8 +185,10 @@ class UDPPlayer:
         print("[UDP] Heartbeat thread started")
         while self._hb_running.is_set():
             try:
-                # Keep NAT mapping alive; server expects JSON KEEP_ALIVE
-                self._sock.send(b'{"type":"KEEP_ALIVE"}')  # nosec
+                # Use sendto() like C code - keeps NAT mapping alive
+                heartbeat_msg = b'{"type":"KEEP_ALIVE"}'
+                self._sock.sendto(heartbeat_msg, self._server_addr)  # nosec
+                
                 # Throttle heartbeat logs (every 60th ~10 minutes) or suppress via env
                 if not self._suppress_hb_log:
                     self._hb_count += 1
@@ -208,11 +229,14 @@ class UDPPlayer:
             else:
                 self._opus_decoder = None
 
+            # Create UDP socket WITHOUT connecting (like C code)
+            # This allows receiving from any address using recvfrom()
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._sock.settimeout(1.0)
-
-            # Connect to server host:port using UDP so replies return to this socket.
-            # The OS picks an ephemeral local port that the server will reply to.
+            
+            # Don't bind to a specific port - let OS assign ephemeral port
+            # This matches C code behavior where socket uses ephemeral port
+            
             # Allow environment override for UDP host (useful when server advertises public IP but audio flows on overlay)
             host_override = os.getenv("ES_UDP_HOST_OVERRIDE", "").strip()
             host_used = host_override or host_hint
@@ -220,20 +244,20 @@ class UDPPlayer:
                 print("[UDP] ERROR: No udp_host provided by server")
                 self.stop()
                 return False
+                
             self._server_addr = (host_used, int(udp_port))
+            
+            # Send initial heartbeat using sendto() (like C code)
+            # This establishes NAT mapping and tells server where to send packets
             try:
-                self._sock.connect(self._server_addr)
-            except Exception as e:
-                print(f"[UDP] ERROR: UDP connect failed to {self._server_addr}: {e}")
-                self.stop()
-                return False
-
-            # Immediate heartbeat to open the path
-            try:
-                self._sock.send(b'{"type":"KEEP_ALIVE"}')  # nosec
+                heartbeat_msg = b'{"type":"KEEP_ALIVE"}'
+                self._sock.sendto(heartbeat_msg, self._server_addr)  # nosec
+                
+                # Log local address (ephemeral port assigned by OS)
                 try:
                     la = self._sock.getsockname()
-                    print(f"[UDP] Local addr: {la} -> {self._server_addr}")
+                    print(f"[UDP] Local addr: {la} -> Server: {self._server_addr}")
+                    print("[UDP] Initial heartbeat sent to establish NAT mapping")
                 except Exception:
                     pass
             except Exception as e:
@@ -244,7 +268,7 @@ class UDPPlayer:
             self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
             self._hb_thread.start()
 
-            print(f"[UDP] Connected to server {host_used}:{udp_port} (ephemeral local port in use)")
+            print(f"[UDP] Listening on ephemeral port, server: {host_used}:{udp_port}")
             self._running.set()
             self._recv_thread = threading.Thread(target=self._receiver_loop, daemon=True)
             self._recv_thread.start()
