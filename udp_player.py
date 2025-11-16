@@ -3,6 +3,7 @@ import threading
 import base64
 import json
 import os
+import time
 from typing import Dict, Optional, List, Tuple
 
 from audio_devices import (
@@ -178,7 +179,11 @@ class UDPPlayer:
                             print("[UDP] HEARTBEAT sent")
             except Exception:
                 pass
-            self._hb_running.wait(10.0)
+            # Sleep for 10 seconds, checking event state periodically
+            for _ in range(100):  # Check every 0.1 seconds for responsiveness
+                if not self._hb_running.is_set():
+                    break
+                time.sleep(0.1)
         print("[UDP] Heartbeat thread stopped")
 
     def start(self, udp_port: int, host_hint: str = "", aes_key_b64: str = "") -> bool:
