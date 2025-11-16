@@ -1,5 +1,5 @@
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Callable
 
 try:
     import lgpio
@@ -97,7 +97,8 @@ def cleanup_gpio():
     gpio_states.clear()
 
 
-def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100):
+def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100,
+                 on_change: Optional[Callable[[int, int], None]] = None):
     if gpio_chip is None:
         print("[GPIO] ERROR: GPIO not initialized")
         return
@@ -117,6 +118,11 @@ def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100):
                     status = "ACTIVE" if val == 0 else "INACTIVE"
                     print(f"[GPIO] PIN {pin_num} (GPIO {gpio_num}): {status}")
                     changed.append((gpio_num, val))
+                    if on_change is not None:
+                        try:
+                            on_change(gpio_num, val)
+                        except Exception as e:
+                            print(f\"[GPIO] WARNING: on_change callback error for GPIO {gpio_num}: {e}\")
 
             count += 1
             if count >= status_every:

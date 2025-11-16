@@ -1,5 +1,5 @@
 import sys
-from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio
+from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio, GPIO_PINS
 from config import load_config, get_channel_ids, get_tone_detect_config
 from websocket_client import start_websocket
 
@@ -20,14 +20,33 @@ def main() -> int:
         for cid, td in tone_map:
             print(f"  {cid}: tone_detect={'ENABLED' if td else 'DISABLED'}")
 
-    start_websocket("wss://audio.redenes.org/ws/")
+    # Start WS without auto-register; GPIO activity will trigger channel registration
+    start_websocket("wss://audio.redenes.org/ws/", ch_ids)
 
     print("[MAIN] GPIO monitor starting...")
     if not init_gpio(0):
         print("[MAIN] Failed to initialize GPIO (chip 0)")
         return 1
     try:
-        monitor_gpio(poll_interval=0.1, status_every=100)
+        # Build mapping from GPIO number to channel_id by index order
+        gpio_keys = list(GPIO_PINS.keys())
+        gpio_to_channel = {}
+        for idx, gpio_num in enumerate(gpio_keys):
+            if idx < len(ch_ids):
+                gpio_to_channel[gpio_num] = ch_ids[idx]
+        # Callback to (lazily) register/connect channel when its GPIO becomes ACTIVE (value 0)
+        from websocket_client import send_transmit_event, register_channel, send_connect_message
+        def _on_gpio_change(gpio_num: int, state: int):
+            ch_id = gpio_to_channel.get(gpio_num)
+            if not ch_id:
+                return
+            if state == 0:
+                send_connect_message(ch_id)
+                register_channel(ch_id)
+                send_transmit_event(ch_id, True)
+            elif state == 1:
+                send_transmit_event(ch_id, False)
+        monitor_gpio(poll_interval=0.1, status_every=100, on_change=_on_gpio_change)
     finally:
         cleanup_gpio()
         print("[MAIN] GPIO monitor stopped")

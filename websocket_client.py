@@ -1,47 +1,6 @@
 import threading
 import asyncio
 import websockets
-
-
-async def _ws_run(url: str):
-    try:
-        async with websockets.connect(url) as ws:
-            print("[WEBSOCKET] Connected")
-            while True:
-                msg = await ws.recv()
-                if isinstance(msg, (bytes, bytearray)):
-                    msg = msg.decode("utf-8", errors="replace")
-                txt = (msg or "").strip()
-                if not txt:
-                    continue
-                if "users_connected" in txt:
-                    try:
-                        import json
-                        data = json.loads(txt)
-                        uc = data.get("users_connected", {})
-                        total = uc.get("total", 0)
-                        connected = uc.get("connected", [])
-                        print(f"[WEBSOCKET] Users Connected: total={total}, entries={len(connected)}")
-                        if isinstance(connected, list) and connected:
-                            for idx, user in enumerate(connected[:5]):
-                                user_id = user.get("id") or user.get("user_id") or user.get("name") or user.get("user_name") or "Unknown"
-                                print(f"[WEBSOCKET] User {idx+1}: {user_id}")
-                    except Exception:
-                        print(f"[WEBSOCKET] Users Connected (raw): {txt[:500]}")
-                    continue
-                print(f"[WEBSOCKET] Message: {txt[:300]}")
-    except Exception as e:
-        print(f"[WEBSOCKET] ERROR: {e}")
-
-
-def start_websocket(url: str = "wss://audio.redenes.org/ws/") -> threading.Thread:
-    def runner():
-        asyncio.run(_ws_run(url))
-    t = threading.Thread(target=runner, daemon=True)
-    t.start()
-    return t
-
-
 import websockets
 import asyncio
 import json
@@ -61,6 +20,7 @@ ws_event_loop: Optional[asyncio.AbstractEventLoop] = None
 message_handlers: Dict[str, Callable[[Dict[str, Any]], None]] = {}
 
 registered_channels: List[str] = []
+pending_register_ids: List[str] = []
 
 users_connected_count = 0
 connected_users: List[Dict[str, Any]] = []
@@ -243,6 +203,12 @@ def send_connect_message(channel_id: str) -> bool:
 
     return False
 
+def register_channels(channel_ids: List[str]) -> None:
+    for cid in channel_ids:
+        # Send a "connect" first so server can associate the session, then register
+        send_connect_message(cid)
+        register_channel(cid)
+
 def parse_udp_config(message: str) -> Optional[Dict[str, Any]]:
 
     try:
@@ -424,8 +390,10 @@ def global_websocket_thread(url: str):
             return
 
         try:
-            import channel_manager
-            channel_manager.register_channels_with_websocket()
+            # Connection established; waiting for GPIO-driven registration
+            if pending_register_ids:
+                print(f"[WEBSOCKET] Pending channel IDs provided ({len(pending_register_ids)}), "
+                      f"registration will occur on GPIO activation")
         except Exception as e:
             print(f"[WEBSOCKET] WARNING: Failed to register channels: {e}")
 
@@ -447,3 +415,12 @@ def global_websocket_thread(url: str):
             ws_event_loop = None
             print("[WEBSOCKET] WebSocket thread stopped")
 
+
+def start_websocket(url: str = "wss://audio.redenes.org/ws/", channel_ids: Optional[List[str]] = None) -> threading.Thread:
+    if isinstance(channel_ids, list) and channel_ids:
+        # Stash for registration right after connect
+        pending_register_ids.clear()
+        pending_register_ids.extend([str(c).strip() for c in channel_ids if str(c).strip()])
+    t = threading.Thread(target=lambda: global_websocket_thread(url), daemon=True)
+    t.start()
+    return t
