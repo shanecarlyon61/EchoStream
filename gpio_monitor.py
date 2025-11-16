@@ -2,17 +2,11 @@ import time
 from typing import Dict, Optional
 
 try:
-    import lgpio  # Preferred on RPi5
+    import lgpio
     HAS_LGPIO = True
 except Exception:
     HAS_LGPIO = False
-    lgpio = None  # type: ignore
-
-# Physical pin mapping from prior design:
-#  - Physical 38 -> GPIO 20
-#  - Physical 40 -> GPIO 21
-#  - Physical 16 -> GPIO 23
-#  - Physical 18 -> GPIO 24
+    lgpio = None
 GPIO_PINS = {
     20: 38,
     21: 40,
@@ -28,7 +22,7 @@ def init_gpio(chip: int = 0) -> bool:
     global gpio_chip
 
     if not HAS_LGPIO:
-        print("[GPIO] ERROR: lgpio module not available. Install: sudo apt install python3-lgpio")
+        print("[GPIO] ERROR: lgpio module not available")
         return False
 
     if gpio_chip is not None:
@@ -44,12 +38,10 @@ def init_gpio(chip: int = 0) -> bool:
 
         print(f"[GPIO] GPIO chip {chip} opened successfully")
 
-        # Configure pins as inputs with pull-up
         for gpio_num, pin_num in GPIO_PINS.items():
             if not init_gpio_pin(gpio_num):
                 print(f"[GPIO] WARNING: Failed to initialize GPIO {gpio_num} (pin {pin_num})")
             else:
-                # Prime initial state
                 state = read_pin(gpio_num)
                 gpio_states[gpio_num] = state
                 status = "ACTIVE" if state == 0 else ("INACTIVE" if state == 1 else "UNKNOWN")
@@ -67,7 +59,6 @@ def init_gpio_pin(gpio_num: int) -> bool:
     if gpio_chip is None:
         return False
     try:
-        # Claim input with internal pull-up
         res = lgpio.gpio_claim_input(gpio_chip, gpio_num, lgpio.SET_PULL_UP)
         if res != 0:
             print(f"[GPIO] ERROR: gpio_claim_input({gpio_num}) returned {res}")
@@ -107,12 +98,6 @@ def cleanup_gpio():
 
 
 def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100):
-    """
-    Poll GPIO pins and print:
-      - State changes immediately
-      - A consolidated status every (status_every * poll_interval) seconds
-    Active (LOW=0) indicates PTT pressed; Inactive (HIGH=1) indicates released.
-    """
     if gpio_chip is None:
         print("[GPIO] ERROR: GPIO not initialized")
         return

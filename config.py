@@ -6,10 +6,6 @@ DEFAULT_CONFIG_PATH = os.path.expanduser("~/.an/config.json")
 
 
 def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
-    """
-    Load full JSON configuration from ~/.an/config.json (by default).
-    Returns an empty dict if file is missing or invalid.
-    """
     try:
         with open(path, "r") as f:
             return json.load(f)
@@ -19,12 +15,6 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
 
 
 def get_channel_ids(cfg: Dict[str, Any]) -> List[str]:
-    """
-    Extract channel IDs from the expected structure:
-    cfg['shadow']['state']['desired']['software_configuration'][0]
-      -> 'channel_one'/'channel_two'/'channel_three'/'channel_four' each with 'channel_id'
-    Returns a list of up to 4 channel IDs (missing entries are skipped).
-    """
     result: List[str] = []
     try:
         sw_cfg_list = (
@@ -47,10 +37,6 @@ def get_channel_ids(cfg: Dict[str, Any]) -> List[str]:
 
 
 def get_tone_detect_config(cfg: Dict[str, Any]) -> List[Tuple[str, bool]]:
-    """
-    Extract per-channel tone_detect flags in channel order.
-    Returns a list of (channel_id, tone_detect_bool).
-    """
     out: List[Tuple[str, bool]] = []
     try:
         sw_cfg_list = (

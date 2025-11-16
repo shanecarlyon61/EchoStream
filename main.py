@@ -1,6 +1,7 @@
 import sys
 from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio
 from config import load_config, get_channel_ids, get_tone_detect_config
+from websocket_client import start_websocket
 
 
 def main() -> int:
@@ -18,6 +19,8 @@ def main() -> int:
         print("[MAIN] Tone detection per channel:")
         for cid, td in tone_map:
             print(f"  {cid}: tone_detect={'ENABLED' if td else 'DISABLED'}")
+
+    start_websocket("wss://audio.redenes.org/ws/")
 
     print("[MAIN] GPIO monitor starting...")
     if not init_gpio(0):
