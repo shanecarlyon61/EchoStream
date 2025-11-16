@@ -46,6 +46,11 @@ def main() -> int:
                 send_transmit_event(ch_id, True)
             elif state == 1:
                 send_transmit_event(ch_id, False)
+        # Proactively register channels for GPIOs that are already ACTIVE at startup
+        from gpio_monitor import gpio_states
+        for gpio_num, state in list(gpio_states.items()):
+            if state == 0:
+                _on_gpio_change(gpio_num, state)
         monitor_gpio(poll_interval=0.1, status_every=100, on_change=_on_gpio_change)
     finally:
         cleanup_gpio()
