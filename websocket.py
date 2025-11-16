@@ -68,9 +68,11 @@ def send_websocket_transmit_event(channel_id: str, is_started: int):
                 global_ws_context
             )
         else:
-            # Fallback: try to send synchronously (may not work)
-            if static_log_count % 100 == 0:
+            # Fallback: log occasionally that we couldn't send because there's no loop
+            fallback_count = getattr(send_websocket_transmit_event, "_fallback_warn_count", 0)
+            if fallback_count % 100 == 0:
                 print(f"[WARNING] Cannot send WebSocket message - no active event loop")
+            send_websocket_transmit_event._fallback_warn_count = fallback_count + 1
     except Exception as e:
         print(f"[ERROR] Failed to send WebSocket message for channel {channel_id}: {e}")
 
@@ -147,36 +149,30 @@ async def websocket_handler():
                         print("=" * 60)
                         
                         # Parse the WebSocket configuration
-                        if parse_websocket_config(message, global_config):
-                            print("Successfully parsed UDP connection info")
-                            global_config_initialized = True
+                    if parse_websocket_config(message, global_config):
+                        print("Successfully parsed UDP connection info")
+                        global_config_initialized = True
+                        
+                        # Setup UDP connection
+                        if udp.setup_global_udp(global_config):
+                            print("UDP connection established")
                             
-                            # Setup UDP connection
-                            if udp.setup_global_udp(global_config):
-                                print("UDP connection established")
-                                
-                                # Start transmission for all active channels (only if GPIO is active)
-                                for i in range(4):
-                                    if audio.channels[i].active:
-                                        # Check GPIO status before starting transmission
-                                        if not audio.channels[i].audio.gpio_active:
-                                            print(f"[WEBSOCKET] Channel {audio.channels[i].audio.channel_id}: Skipping transmission start (GPIO not active)")
-                                            continue
+                            # Start transmission for all active channels (regardless of current GPIO state,
+                            # matching the C implementation where streams are always started and GPIO only gates TX)
+                            for i in range(4):
+                                if audio.channels[i].active:
+                                    key_b64 = "46dR4QR5KH7JhPyyjh/ZS4ki/3QBVwwOTkkQTdZQkC0="
+                                    key_bytes = crypto.decode_base64(key_b64)
+                                    if len(key_bytes) == 32:
+                                        audio.channels[i].audio.key = list(key_bytes)
+                                        print(f"AES key decoded for channel {audio.channels[i].audio.channel_id}")
                                         
-                                        key_b64 = "46dR4QR5KH7JhPyyjh/ZS4ki/3QBVwwOTkkQTdZQkC0="
-                                        key_bytes = crypto.decode_base64(key_b64)
-                                        if len(key_bytes) == 32:
-                                            audio.channels[i].audio.key = list(key_bytes)
-                                            print(f"AES key decoded for channel {audio.channels[i].audio.channel_id}")
-                                            
-                                            # Start transmission only if GPIO is active
-                                            if audio.start_transmission_for_channel(audio.channels[i].audio):
-                                                print(f"Audio transmission started for channel {audio.channels[i].audio.channel_id} (GPIO active)")
-                                                # Send transmit_started since GPIO is already confirmed active
-                                                print(f"[UDP READY] Sending transmit_started for channel {audio.channels[i].audio.channel_id} (GPIO active, UDP now ready)")
-                                                send_websocket_transmit_event(audio.channels[i].audio.channel_id, 1)
-                                        else:
-                                            print(f"Key decode failed for channel {audio.channels[i].audio.channel_id}")
+                                        if audio.start_transmission_for_channel(audio.channels[i].audio):
+                                            print(f"Audio transmission started for channel {audio.channels[i].audio.channel_id}")
+                                            # Note: initial transmit_started events were already sent at connection time.
+                                            # GPIO state changes will be reflected by future transmit events.
+                                    else:
+                                        print(f"Key decode failed for channel {audio.channels[i].audio.channel_id}")
                     elif 'users_connected' in str(data):
                         # Track users_connected messages to reduce spam
                         if not hasattr(websocket_handler, '_users_connected_count'):
