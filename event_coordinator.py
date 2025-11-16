@@ -84,10 +84,6 @@ def handle_udp_ready(udp_config: Dict[str, Any]):
             if udp_manager.setup_udp(udp_host, udp_port):
                 print(f"[EVENT] UDP configured: {udp_host}:{udp_port}")
 
-                udp_manager.start_udp_listener()
-
-                udp_manager.start_heartbeat()
-
                 if aes_key_str and aes_key_str != 'N/A':
                     key_bytes = crypto.decode_base64(aes_key_str)
                     if key_bytes and len(key_bytes) == 32:

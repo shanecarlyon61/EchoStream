@@ -23,6 +23,7 @@ def setup_udp(host: str, port: int, bind_port: int = 0) -> bool:
     
     try:
         global_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        global_udp_socket.settimeout(None)
         global_server_addr = (host, port)
         print(f"[UDP] Server address: {global_server_addr}")
         
@@ -35,6 +36,10 @@ def setup_udp(host: str, port: int, bind_port: int = 0) -> bool:
             print(f"[UDP] Could not get local socket info: {e}")
         
         print(f"[UDP] UDP socket configured for {host}:{port}")
+        
+        start_udp_listener()
+        start_heartbeat()
+        
         return True
         
     except Exception as e:
@@ -108,7 +113,6 @@ def receive_audio_packet() -> Optional[Tuple[str, bytes]]:
         return None
     
     try:
-        print(f"[UDP] socket_to_use: {socket_to_use}")
         data, addr = socket_to_use.recvfrom(8192)
         
         if not hasattr(receive_audio_packet, '_first_receive_logged'):
