@@ -1,8 +1,24 @@
 import sys
 from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio
+from config import load_config, get_channel_ids, get_tone_detect_config
 
 
 def main() -> int:
+    print("[MAIN] Loading configuration...")
+    cfg = load_config()
+    ch_ids = get_channel_ids(cfg)
+    tone_map = get_tone_detect_config(cfg)
+    if ch_ids:
+        print(f"[MAIN] Loaded {len(ch_ids)} channel ID(s) from config:")
+        for idx, cid in enumerate(ch_ids, 1):
+            print(f"  Channel {idx}: {cid}")
+    else:
+        print("[MAIN] No channel IDs found in config")
+    if tone_map:
+        print("[MAIN] Tone detection per channel:")
+        for cid, td in tone_map:
+            print(f"  {cid}: tone_detect={'ENABLED' if td else 'DISABLED'}")
+
     print("[MAIN] GPIO monitor starting...")
     if not init_gpio(0):
         print("[MAIN] Failed to initialize GPIO (chip 0)")
