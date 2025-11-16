@@ -12,6 +12,7 @@ global_interrupted = threading.Event()
 
 # Audio/UDP playback resources (bound to WebSocket event loop thread)
 _audio_streams_by_channel: Dict[int, Dict[str, object]] = {}  # channel_index -> {'pa': pa, 'stream': stream}
+_channel_output_device_index: Dict[int, int] = {}  # preferred device per channel index (set by main)
 _udp_transport = None
 _udp_listening_port: Optional[int] = None
 _udp_task: Optional[asyncio.Task] = None
@@ -334,12 +335,23 @@ def set_udp_config_callback(callback: Callable[[Dict[str, Any]], None]):
     global udp_config_callback
     udp_config_callback = callback
 
+def set_output_device_map(ch_idx_to_device: Dict[int, int]) -> None:
+    try:
+        _channel_output_device_index.clear()
+        for k, v in ch_idx_to_device.items():
+            _channel_output_device_index[int(k)] = int(v)
+        print(f"[AUDIO] Output device map set for {len(_channel_output_device_index)} channel(s)")
+    except Exception as e:
+        print(f"[AUDIO] WARNING: Failed setting output device map: {e}")
+
 def _ensure_output_stream_for_channel_index(channel_index: int) -> None:
     if not _AUDIO_OK:
         return
     if channel_index in _audio_streams_by_channel:
         return
-    device_index = select_output_device_for_channel(channel_index)
+    device_index = _channel_output_device_index.get(channel_index)
+    if device_index is None:
+        device_index = select_output_device_for_channel(channel_index)
     if device_index is None:
         print(f"[AUDIO] WARNING: No output device for channel index {channel_index}")
         return

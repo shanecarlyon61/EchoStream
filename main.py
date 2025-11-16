@@ -3,6 +3,8 @@ from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio, GPIO_PINS
 from config import load_config, get_channel_ids, get_tone_detect_config
 from websocket_client import start_websocket
 from websocket_client import set_udp_config_callback
+from websocket_client import set_output_device_map
+from audio_devices import list_output_devices, select_output_device_for_channel
 
 
 def main() -> int:
@@ -20,6 +22,28 @@ def main() -> int:
         print("[MAIN] Tone detection per channel:")
         for cid, td in tone_map:
             print(f"  {cid}: tone_detect={'ENABLED' if td else 'DISABLED'}")
+
+    # Enumerate audio output devices and align to channels
+    try:
+        devices = list_output_devices()
+        if devices:
+            print("[MAIN] Detected audio output devices:")
+            for d in devices:
+                print(f"  - index={d.get('index')} name={d.get('name')} host_api={d.get('host_api')}")
+        else:
+            print("[MAIN] WARNING: No audio output devices detected")
+        ch_idx_to_device = {}
+        for ch_index in range(len(ch_ids)):
+            dev_index = select_output_device_for_channel(ch_index)
+            if dev_index is not None:
+                ch_idx_to_device[ch_index] = int(dev_index)
+                print(f"[MAIN] Channel {ch_index + 1} ({ch_ids[ch_index]}) -> audio_device_index {dev_index}")
+            else:
+                print(f"[MAIN] WARNING: No audio device selected for channel {ch_index + 1} ({ch_ids[ch_index]})")
+        if ch_idx_to_device:
+            set_output_device_map(ch_idx_to_device)
+    except Exception as e:
+        print(f"[MAIN] WARNING: Audio device alignment failed: {e}")
 
     # Start WS without auto-register; GPIO activity will trigger channel registration
     start_websocket("wss://audio.redenes.org/ws/", ch_ids)
