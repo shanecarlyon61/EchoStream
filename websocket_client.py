@@ -10,6 +10,19 @@ from typing import Optional, Dict, Any, Callable, List
 # Local interruption flag (replaces dependency on removed echostream module)
 global_interrupted = threading.Event()
 
+# Audio/UDP playback resources (bound to WebSocket event loop thread)
+_audio_streams_by_channel: Dict[int, Dict[str, object]] = {}  # channel_index -> {'pa': pa, 'stream': stream}
+_udp_transport = None
+_udp_listening_port: Optional[int] = None
+
+try:
+    from audio_devices import select_output_device_for_channel, open_output_stream, close_stream
+    from gpio_monitor import GPIO_PINS, gpio_states
+    _AUDIO_OK = True
+except Exception as _e:
+    print(f"[WEBSOCKET] WARNING: Audio/GPIO modules not fully available: {_e}")
+    _AUDIO_OK = False
+
 global_ws_client: Optional[websockets.WebSocketClientProtocol] = None
 
 ws_connected = False
@@ -320,6 +333,86 @@ def set_udp_config_callback(callback: Callable[[Dict[str, Any]], None]):
     global udp_config_callback
     udp_config_callback = callback
 
+def _ensure_output_stream_for_channel_index(channel_index: int) -> None:
+    if not _AUDIO_OK:
+        return
+    if channel_index in _audio_streams_by_channel:
+        return
+    device_index = select_output_device_for_channel(channel_index)
+    if device_index is None:
+        print(f"[AUDIO] WARNING: No output device for channel index {channel_index}")
+        return
+    pa, stream = open_output_stream(device_index)
+    if pa is None or stream is None:
+        return
+    _audio_streams_by_channel[channel_index] = {'pa': pa, 'stream': stream}
+    print(f"[AUDIO] Output stream opened on device {device_index} for channel index {channel_index}")
+
+def _close_all_output_streams() -> None:
+    if not _AUDIO_OK:
+        return
+    for ch_idx, bundle in list(_audio_streams_by_channel.items()):
+        pa = bundle.get('pa')
+        stream = bundle.get('stream')
+        try:
+            if pa and stream:
+                close_stream(pa, stream)  # type: ignore[arg-type]
+        except Exception:
+            pass
+    _audio_streams_by_channel.clear()
+
+def _active_channel_indices_from_gpio() -> List[int]:
+    if not _AUDIO_OK:
+        return []
+    try:
+        keys = list(GPIO_PINS.keys())
+        actives: List[int] = []
+        for g, val in gpio_states.items():
+            if val == 0 and g in keys:
+                actives.append(keys.index(g))
+        return actives
+    except Exception:
+        return []
+
+class _UDPProtocol(asyncio.DatagramProtocol):
+    def connection_made(self, transport):
+        print("[UDP] Async UDP listener started")
+    def datagram_received(self, data, addr):
+        try:
+            for ch_index in _active_channel_indices_from_gpio():
+                _ensure_output_stream_for_channel_index(ch_index)
+                bundle = _audio_streams_by_channel.get(ch_index)
+                if bundle:
+                    try:
+                        bundle['stream'].write(data)  # type: ignore[index]
+                    except Exception as e:
+                        print(f"[UDP] WARNING: stream write failed ch={ch_index}: {e}")
+        except Exception as e:
+            print(f"[UDP] ERROR: datagram handler exception: {e}")
+    def error_received(self, exc):
+        print(f"[UDP] WARNING: error received: {exc}")
+    def connection_lost(self, exc):
+        print("[UDP] Async UDP listener stopped")
+
+def _start_async_udp_listener(loop: asyncio.AbstractEventLoop, udp_port: int, host_hint: str = "") -> None:
+    global _udp_transport, _udp_listening_port
+    try:
+        if _udp_transport is not None and _udp_listening_port == udp_port:
+            return
+        if _udp_transport is not None:
+            try:
+                _udp_transport.close()
+            except Exception:
+                pass
+            _udp_transport = None
+        listen = loop.create_datagram_endpoint(_UDPProtocol, local_addr=('0.0.0.0', int(udp_port)))
+        transport, _ = loop.run_until_complete(listen)
+        _udp_transport = transport
+        _udp_listening_port = udp_port
+        print(f"[UDP] Listening for audio on 0.0.0.0:{udp_port} (server={host_hint})")
+    except Exception as e:
+        print(f"[UDP] ERROR: Failed to start async UDP listener on {udp_port}: {e}")
+
 async def websocket_handler_async():
     global global_ws_client, ws_connected
 
@@ -374,6 +467,14 @@ async def websocket_handler_async():
                             udp_config_callback(udp_config)
                         except Exception as e:
                             print(f"[WEBSOCKET] ERROR: Exception in UDP config callback: {e}")
+                    # Also start UDP listener on the websocket event loop thread
+                    try:
+                        if ws_event_loop is not None:
+                            _start_async_udp_listener(ws_event_loop,
+                                                      int(udp_config.get('udp_port', 0) or 0),
+                                                      str(udp_config.get('udp_host', '')))
+                    except Exception as e:
+                        print(f"[WEBSOCKET] ERROR: Failed to start UDP listener: {e}")
                     continue
 
                 # Handle users_connected messages regardless of structure
