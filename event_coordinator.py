@@ -84,12 +84,22 @@ def handle_udp_ready(udp_config: Dict[str, Any]):
             if udp_manager.setup_udp(udp_host, udp_port):
                 print(f"[EVENT] UDP configured: {udp_host}:{udp_port}")
 
-                if aes_key_str and aes_key_str != 'N/A':
-                    key_bytes = crypto.decode_base64(aes_key_str)
-                    if key_bytes and len(key_bytes) == 32:
-                        all_channels = channel_manager.get_all_channels()
-                        for channel_id in all_channels:
-                            channel_manager.set_channel_encryption_key(channel_id, key_bytes)
+                # Provision AES key for all channels
+                # If server didn't provide aes_key (N/A), fall back to the same constant used by C code
+                try:
+                    if aes_key_str and aes_key_str != 'N/A':
+                        key_bytes = crypto.decode_base64(aes_key_str)
+                    else:
+                        # Fallback to C-side hardcoded key so audio decrypts correctly
+                        fallback_b64 = "46dR4QR5KH7JhPyyjh/ZS4ki/3QBVwwOTkkQTdZQkC0="
+                        key_bytes = crypto.decode_base64(fallback_b64)
+                except Exception:
+                    key_bytes = None
+
+                if key_bytes and len(key_bytes) == 32:
+                    all_channels = channel_manager.get_all_channels()
+                    for channel_id in all_channels:
+                        channel_manager.set_channel_encryption_key(channel_id, key_bytes)
 
                 def handle_udp_packet(channel_id: str, encrypted_data: bytes):
                     try:
