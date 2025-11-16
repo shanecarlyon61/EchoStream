@@ -10,12 +10,9 @@ from typing import Optional, Dict, Any, Callable, List
 # Local interruption flag (replaces dependency on removed echostream module)
 global_interrupted = threading.Event()
 
-# Audio/UDP playback resources (bound to WebSocket event loop thread)
+# Audio resources (when using internal writer)
 _audio_streams_by_channel: Dict[int, Dict[str, object]] = {}  # channel_index -> {'pa': pa, 'stream': stream}
 _channel_output_device_index: Dict[int, int] = {}  # preferred device per channel index (set by main)
-_udp_transport = None
-_udp_listening_port: Optional[int] = None
-_udp_task: Optional[asyncio.Task] = None
 
 try:
     from audio_devices import select_output_device_for_channel, open_output_stream, close_stream
@@ -486,14 +483,16 @@ async def websocket_handler_async():
                             udp_config_callback(udp_config)
                         except Exception as e:
                             print(f"[WEBSOCKET] ERROR: Exception in UDP config callback: {e}")
-                    # Also start UDP listener on the websocket event loop thread
+                    # Start external UDP player (separate thread) aligned with C data plane
                     try:
-                        if ws_event_loop is not None:
-                            _start_async_udp_listener(ws_event_loop,
-                                                      int(udp_config.get('udp_port', 0) or 0),
-                                                      str(udp_config.get('udp_host', '')))
+                        from udp_player import global_udp_player
+                        udp_port = int(udp_config.get('udp_port', 0) or 0)
+                        udp_host = str(udp_config.get('udp_host', ''))
+                        aes_key = str(udp_config.get('aes_key', '') or '')
+                        if udp_port > 0:
+                            global_udp_player.start(udp_port=udp_port, host_hint=udp_host, aes_key_b64=aes_key)
                     except Exception as e:
-                        print(f"[WEBSOCKET] ERROR: Failed to start UDP listener: {e}")
+                        print(f"[WEBSOCKET] ERROR: Failed to start UDP player: {e}")
                     continue
 
                 # Handle users_connected messages regardless of structure
@@ -586,6 +585,12 @@ def start_websocket(url: str = "wss://audio.redenes.org/ws/", channel_ids: Optio
         # Stash for registration right after connect
         pending_register_ids.clear()
         pending_register_ids.extend([str(c).strip() for c in channel_ids if str(c).strip()])
+        # Provide channel IDs to UDP player for id->index mapping
+        try:
+            from udp_player import global_udp_player
+            global_udp_player.set_channel_ids(channel_ids)
+        except Exception:
+            pass
     t = threading.Thread(target=lambda: global_websocket_thread(url), daemon=True)
     t.start()
     return t
