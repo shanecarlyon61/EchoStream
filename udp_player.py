@@ -38,6 +38,11 @@ class UDPPlayer:
         self._opus_decoder = None
         self._channel_ids: List[str] = []
         self._server_addr: Optional[Tuple[str, int]] = None
+        self._hb_thread: Optional[threading.Thread] = None
+        self._hb_running = threading.Event()
+        self._hb_count = 0
+        # If ES_UDP_HEARTBEAT_LOG=0, completely suppress heartbeat logs
+        self._suppress_hb_log = os.getenv("ES_UDP_HEARTBEAT_LOG", "1") == "0"
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
         with self._lock:
@@ -154,6 +159,28 @@ class UDPPlayer:
                 print(f"[UDP] ERROR: receiver loop exception: {e}")
         print("[UDP] Receiver thread exiting")
 
+    def _heartbeat_loop(self) -> None:
+        if not self._server_addr or not self._sock:
+            return
+        print("[UDP] Heartbeat thread started")
+        while self._hb_running.is_set():
+            try:
+                # Keep NAT mapping alive; server expects JSON KEEP_ALIVE
+                self._sock.send(b'{"type":"KEEP_ALIVE"}')  # nosec
+                # Throttle heartbeat logs (every 60th ~10 minutes) or suppress via env
+                if not self._suppress_hb_log:
+                    self._hb_count += 1
+                    if self._hb_count % 60 == 1 or os.getenv("ES_UDP_DEBUG"):
+                        try:
+                            la = self._sock.getsockname()
+                            print(f"[UDP] HEARTBEAT sent from {la} to {self._server_addr}")
+                        except Exception:
+                            print("[UDP] HEARTBEAT sent")
+            except Exception:
+                pass
+            self._hb_running.wait(10.0)
+        print("[UDP] Heartbeat thread stopped")
+
     def start(self, udp_port: int, host_hint: str = "", aes_key_b64: str = "") -> bool:
         if self._sock is not None:
             print("[UDP] Already running")
@@ -225,6 +252,11 @@ class UDPPlayer:
     def stop(self) -> None:
         try:
             self._running.clear()
+            if self._hb_running.is_set():
+                self._hb_running.clear()
+            if self._hb_thread and self._hb_thread.is_alive():
+                self._hb_thread.join(timeout=10.0)
+            self._hb_thread = None
             if self._sock:
                 try:
                     self._sock.close()
