@@ -111,6 +111,9 @@ class UDPPlayer:
 
     def _receiver_loop(self) -> None:
         print("[UDP] Receiver thread started")
+        print(f"[UDP] Channel IDs configured: {self._channel_ids}")
+        print(f"[UDP] AES decryptor: {'READY' if self._aesgcm else 'NOT AVAILABLE'}")
+        print(f"[UDP] Opus decoder: {'READY' if self._opus_decoder else 'NOT AVAILABLE'}")
         while self._running.is_set():
             try:
                 # Use recvfrom() like C code - receives from ANY address
@@ -120,31 +123,48 @@ class UDPPlayer:
                 if not data:
                     continue
                 
-                # Log every 1000th packet (like C code does)
+                # Log every packet initially, then every 1000th (for debugging)
                 self._receive_count += 1
-                if self._receive_count % 1000 == 0:
+                if self._receive_count <= 10 or self._receive_count % 1000 == 0:
                     print(f"[UDP] Received {len(data)} bytes from {addr} (count: {self._receive_count})")
                 
                 try:
                     msg = json.loads(data.decode("utf-8", errors="ignore"))
-                except Exception:
+                except Exception as e:
+                    if self._receive_count <= 10:
+                        print(f"[UDP] JSON decode failed: {e}, data preview: {data[:100]}")
                     continue
                     
                 if not isinstance(msg, dict):
+                    if self._receive_count <= 10:
+                        print(f"[UDP] Message is not a dict: {type(msg)}")
                     continue
                     
-                if msg.get("type") != "audio":
+                msg_type = msg.get("type", "")
+                if msg_type != "audio":
+                    if self._receive_count <= 10:
+                        print(f"[UDP] Non-audio message type: '{msg_type}', ignoring")
                     continue
                     
                 ch_id = str(msg.get("channel_id", "")).strip()
                 b64 = msg.get("data", "")
                 
                 if not ch_id or not b64:
+                    if self._receive_count <= 10:
+                        print(f"[UDP] Missing channel_id or data: ch_id='{ch_id}', has_data={bool(b64)}")
                     continue
+                
+                if self._receive_count <= 10:
+                    print(f"[UDP] Processing audio packet: channel_id='{ch_id}', data_len={len(b64)}")
                     
                 pcm = self._decrypt_and_decode(b64)
                 if not pcm:
+                    if self._receive_count <= 10:
+                        print(f"[UDP] Decrypt/decode failed for channel '{ch_id}'")
                     continue
+                
+                if self._receive_count <= 10:
+                    print(f"[UDP] Successfully decoded {len(pcm)} bytes PCM for channel '{ch_id}'")
                     
                 # Find channel by channel_id (matching C code behavior)
                 target_index = self._map_channel_id_to_index(ch_id)
@@ -213,13 +233,26 @@ class UDPPlayer:
             return True
         try:
             # Init crypto/decoder if available
-            if aes_key_b64 and aes_key_b64 not in ("", "N/A") and HAS_AES:
+            # Use hardcoded key from C code if server sends 'N/A' or empty
+            # C code uses: "46dR4QR5KH7JhPyyjh/ZS4ki/3QBVwwOTkkQTdZQkC0="
+            if HAS_AES:
+                # Always try to init AES - use hardcoded key if server doesn't provide one
+                key_b64_to_use = aes_key_b64 if (aes_key_b64 and aes_key_b64 not in ("", "N/A")) else "46dR4QR5KH7JhPyyjh/ZS4ki/3QBVwwOTkkQTdZQkC0="
                 try:
-                    key = base64.b64decode(aes_key_b64)
-                    self._aesgcm = AESGCM(key)
+                    key = base64.b64decode(key_b64_to_use)
+                    if len(key) == 32:  # AES-256 requires 32 bytes
+                        self._aesgcm = AESGCM(key)
+                        key_source = 'server' if (aes_key_b64 and aes_key_b64 not in ("", "N/A")) else 'hardcoded'
+                        print(f"[UDP] AES key initialized (using {key_source} key)")
+                    else:
+                        print(f"[UDP] WARNING: AES key length invalid: {len(key)} bytes (expected 32)")
+                        self._aesgcm = None
                 except Exception as e:
                     print(f"[UDP] WARNING: AES key init failed: {e}")
                     self._aesgcm = None
+            else:
+                print("[UDP] WARNING: AES library not available")
+                self._aesgcm = None
             if HAS_OPUS:
                 try:
                     self._opus_decoder = opuslib.Decoder(48000, 1)  # mono

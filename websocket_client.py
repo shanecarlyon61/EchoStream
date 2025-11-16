@@ -492,10 +492,22 @@ async def websocket_handler_async():
                         udp_port = int(udp_config.get('udp_port', 0) or 0)
                         udp_host = str(udp_config.get('udp_host', ''))
                         aes_key = str(udp_config.get('aes_key', '') or '')
+                        
+                        # Ensure channel IDs are set before starting UDP player
+                        # (they should already be set in start_websocket, but double-check)
+                        if pending_register_ids:
+                            global_udp_player.set_channel_ids(pending_register_ids)
+                            print(f"[WEBSOCKET] Set channel IDs for UDP player: {pending_register_ids}")
+                        
                         if udp_port > 0:
+                            print(f"[WEBSOCKET] Starting UDP player: port={udp_port}, host={udp_host}, aes_key={'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}")
                             global_udp_player.start(udp_port=udp_port, host_hint=udp_host, aes_key_b64=aes_key)
+                        else:
+                            print(f"[WEBSOCKET] WARNING: Invalid UDP port: {udp_port}")
                     except Exception as e:
                         print(f"[WEBSOCKET] ERROR: Failed to start UDP player: {e}")
+                        import traceback
+                        traceback.print_exc()
                     continue
 
                 # Handle users_connected messages regardless of structure
