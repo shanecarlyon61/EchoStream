@@ -35,14 +35,13 @@ def main() -> int:
             if idx < len(ch_ids):
                 gpio_to_channel[gpio_num] = ch_ids[idx]
         # Callback to (lazily) register/connect channel when its GPIO becomes ACTIVE (value 0)
-        from websocket_client import send_transmit_event, register_channel, send_connect_message
+        from websocket_client import send_transmit_event, request_register_channel
         def _on_gpio_change(gpio_num: int, state: int):
             ch_id = gpio_to_channel.get(gpio_num)
             if not ch_id:
                 return
             if state == 0:
-                send_connect_message(ch_id)
-                register_channel(ch_id)
+                request_register_channel(ch_id)
                 send_transmit_event(ch_id, True)
             elif state == 1:
                 send_transmit_event(ch_id, False)
@@ -50,7 +49,10 @@ def main() -> int:
         from gpio_monitor import gpio_states
         for gpio_num, state in list(gpio_states.items()):
             if state == 0:
-                _on_gpio_change(gpio_num, state)
+                ch_id = gpio_to_channel.get(gpio_num)
+                if ch_id:
+                    request_register_channel(ch_id)
+                    send_transmit_event(ch_id, True)
         monitor_gpio(poll_interval=0.1, status_every=100, on_change=_on_gpio_change)
     finally:
         cleanup_gpio()

@@ -243,6 +243,17 @@ def register_channels(channel_ids: List[str]) -> None:
                 except ValueError:
                     pass
 
+def request_register_channel(channel_id: str) -> None:
+    # Queue channel for registration if not connected yet, else send immediately
+    if channel_id in registered_channels:
+        return
+    if not ws_connected or global_ws_client is None:
+        if channel_id not in pending_register_ids:
+            pending_register_ids.append(channel_id)
+            print(f"[WEBSOCKET] Queued channel {channel_id} for registration (pending={len(pending_register_ids)})")
+        return
+    register_channels([channel_id])
+
 def parse_udp_config(message: str) -> Optional[Dict[str, Any]]:
 
     try:
@@ -424,10 +435,10 @@ def global_websocket_thread(url: str):
             return
 
         try:
-            # Connection established; waiting for GPIO-driven registration
+            # Connection established; register any queued channels immediately
             if pending_register_ids:
-                print(f"[WEBSOCKET] Pending channel IDs provided ({len(pending_register_ids)}), "
-                      f"registration will occur on GPIO activation")
+                print(f"[WEBSOCKET] Registering {len(pending_register_ids)} queued channel(s) after connect")
+                register_channels(list(pending_register_ids))
         except Exception as e:
             print(f"[WEBSOCKET] WARNING: Failed to register channels: {e}")
 
