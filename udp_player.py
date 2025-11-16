@@ -114,7 +114,29 @@ class UDPPlayer:
         print(f"[UDP] Channel IDs configured: {self._channel_ids}")
         print(f"[UDP] AES decryptor: {'READY' if self._aesgcm else 'NOT AVAILABLE'}")
         print(f"[UDP] Opus decoder: {'READY' if self._opus_decoder else 'NOT AVAILABLE'}")
+        if self._sock:
+            try:
+                local_addr = self._sock.getsockname()
+                print(f"[UDP] Socket bound to: {local_addr}")
+            except Exception as e:
+                print(f"[UDP] WARNING: Could not get socket address: {e}")
+        
+        loop_count = 0
+        last_log_time = time.time()
         while self._running.is_set():
+            loop_count += 1
+            # Log every 10 seconds that we're still listening
+            current_time = time.time()
+            if current_time - last_log_time >= 10.0:
+                print(f"[UDP] Still listening... (loop iterations: {loop_count}, packets received: {self._receive_count})")
+                last_log_time = current_time
+                if self._sock:
+                    try:
+                        local_addr = self._sock.getsockname()
+                        print(f"[UDP] Socket still bound to: {local_addr}")
+                    except Exception:
+                        pass
+            
             try:
                 # Use recvfrom() like C code - receives from ANY address
                 # This is important because server may send from different IP/port
@@ -184,8 +206,6 @@ class UDPPlayer:
                     except Exception as e:
                         print(f"[UDP] WARNING: write failed for channel index {target_index}: {e}")
                         
-            except socket.timeout:
-                continue
             except OSError as e:
                 if not self._running.is_set():
                     break
@@ -193,10 +213,14 @@ class UDPPlayer:
                 if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
                     # No data available - continue waiting
                     continue
-                print(f"[UDP] WARNING: socket error: {e}")
+                print(f"[UDP] WARNING: socket error: {e} (errno={e.errno})")
+                import traceback
+                traceback.print_exc()
                 continue
             except Exception as e:
                 print(f"[UDP] ERROR: receiver loop exception: {e}")
+                import traceback
+                traceback.print_exc()
         print("[UDP] Receiver thread exiting")
 
     def _heartbeat_loop(self) -> None:
@@ -265,7 +289,8 @@ class UDPPlayer:
             # Create UDP socket WITHOUT connecting (like C code)
             # This allows receiving from any address using recvfrom()
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._sock.settimeout(1.0)
+            # Don't set timeout - let it block like C code does
+            # This ensures we're always ready to receive packets immediately
             
             # Don't bind to a specific port - let OS assign ephemeral port
             # This matches C code behavior where socket uses ephemeral port
