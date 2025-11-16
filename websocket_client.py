@@ -172,6 +172,12 @@ def register_channel(channel_id: str) -> bool:
     if send_message(message):
         registered_channels.append(channel_id)
         print(f"[WEBSOCKET] Registered channel {channel_id}")
+        if channel_id in pending_register_ids:
+            try:
+                pending_register_ids.remove(channel_id)
+                print(f"[WEBSOCKET] pending_register_ids updated: {len(pending_register_ids)} remaining")
+            except ValueError:
+                pass
         return True
 
     return False
