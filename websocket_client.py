@@ -183,11 +183,22 @@ def register_channel(channel_id: str) -> bool:
     return False
 
 def send_transmit_event(channel_id: str, active: bool) -> bool:
-
-    message = json.dumps({
-        "type": "transmit_started" if active else "transmit_stopped",
-        "channel_id": channel_id
-    })
+    try:
+        import time as _time
+        event_type = "transmit_started" if active else "transmit_ended"
+        payload = {
+            event_type: {
+                "affiliation_id": "12345",
+                "user_name": "EchoStream",
+                "agency_name": "TestAgency",
+                "channel_id": channel_id,
+                "time": int(_time.time())
+            }
+        }
+        message = json.dumps(payload)
+    except Exception as e:
+        print(f"[WEBSOCKET] ERROR: Failed to build transmit payload: {e}")
+        return False
 
     if send_message(message):
         status = "PTT PRESSED" if active else "PTT RELEASED"
@@ -197,11 +208,21 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
     return False
 
 def send_connect_message(channel_id: str) -> bool:
-
-    message = json.dumps({
-        "type": "connect",
-        "channel_id": channel_id
-    })
+    try:
+        import time as _time
+        payload = {
+            "connect": {
+                "affiliation_id": "12345",
+                "user_name": "EchoStream",
+                "agency_name": "TestAgency",
+                "channel_id": channel_id,
+                "time": int(_time.time())
+            }
+        }
+        message = json.dumps(payload)
+    except Exception as e:
+        print(f"[WEBSOCKET] ERROR: Failed to build connect payload: {e}")
+        return False
 
     if send_message(message):
         print(f"[WEBSOCKET] Sent connect message for channel {channel_id}")
@@ -211,9 +232,16 @@ def send_connect_message(channel_id: str) -> bool:
 
 def register_channels(channel_ids: List[str]) -> None:
     for cid in channel_ids:
-        # Send a "connect" first so server can associate the session, then register
-        send_connect_message(cid)
-        register_channel(cid)
+        # New protocol: connect acts as registration
+        if send_connect_message(cid):
+            if cid not in registered_channels:
+                registered_channels.append(cid)
+            if cid in pending_register_ids:
+                try:
+                    pending_register_ids.remove(cid)
+                    print(f"[WEBSOCKET] pending_register_ids updated: {len(pending_register_ids)} remaining")
+                except ValueError:
+                    pass
 
 def parse_udp_config(message: str) -> Optional[Dict[str, Any]]:
 
