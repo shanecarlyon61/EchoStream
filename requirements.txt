@@ -1,0 +1,6 @@
+websockets>=10.0,<12
+pyaudio>=0.2.13
+opuslib>=3.0.1
+cryptography>=41.0.0
+lgpio>=0.2.2
+
