@@ -6,7 +6,7 @@ import os
 import time
 import errno
 import numpy as np
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 
 from audio_devices import (
     select_output_device_for_channel,
@@ -30,6 +30,17 @@ except Exception:
     opuslib = None  # type: ignore
     HAS_OPUS = False
 
+try:
+    from config import load_config, get_frequency_filters
+    from frequency_filter import apply_audio_frequency_filters
+    HAS_FREQ_FILTER = True
+except Exception as e:
+    print(f"[UDP] WARNING: Frequency filtering not available: {e}")
+    HAS_FREQ_FILTER = False
+    load_config = None
+    get_frequency_filters = None
+    apply_audio_frequency_filters = None
+
 
 class UDPPlayer:
     def __init__(self):
@@ -52,6 +63,8 @@ class UDPPlayer:
         self._transmitting: Dict[int, bool] = {}  # channel_index -> transmitting state
         # If ES_UDP_HEARTBEAT_LOG=0, completely suppress heartbeat logs
         self._suppress_hb_log = os.getenv("ES_UDP_HEARTBEAT_LOG", "1") == "0"
+        self._frequency_filters: Dict[str, List[Dict[str, Any]]] = {}
+        self._config_cache: Optional[Dict[str, Any]] = None
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
         with self._lock:
@@ -85,6 +98,24 @@ class UDPPlayer:
     def set_channel_ids(self, channel_ids: List[str]) -> None:
         # Preserve order to map index
         self._channel_ids = [str(c).strip() for c in channel_ids if str(c).strip()]
+        self._load_frequency_filters()
+    
+    def _load_frequency_filters(self) -> None:
+        if not HAS_FREQ_FILTER:
+            return
+        try:
+            if self._config_cache is None:
+                self._config_cache = load_config()
+            self._frequency_filters.clear()
+            for channel_id in self._channel_ids:
+                filters = get_frequency_filters(self._config_cache, channel_id)
+                if filters:
+                    self._frequency_filters[channel_id] = filters
+                    print(f"[UDP] Loaded {len(filters)} frequency filter(s) for channel {channel_id}")
+                else:
+                    self._frequency_filters[channel_id] = []
+        except Exception as e:
+            print(f"[UDP] WARNING: Failed to load frequency filters: {e}")
 
     def _map_channel_id_to_index(self, channel_id: str) -> Optional[int]:
         if not channel_id:
@@ -440,8 +471,18 @@ class UDPPlayer:
                     bundle[buffer_pos_key] += 1
                     
                     if bundle[buffer_pos_key] >= 1920:
-                        # Convert to int16 PCM (like C code)
-                        pcm = (np.clip(input_buffer[:1920], -1.0, 1.0) * 32767.0).astype(np.int16)
+                        filtered_buffer = input_buffer[:1920].copy()
+                        if HAS_FREQ_FILTER and apply_audio_frequency_filters:
+                            filters = self._frequency_filters.get(channel_id, [])
+                            if filters:
+                                try:
+                                    filtered_buffer = apply_audio_frequency_filters(
+                                        filtered_buffer, filters, sample_rate=48000
+                                    )
+                                except Exception as e:
+                                    if send_count <= 10:
+                                        print(f"[AUDIO TX] WARNING: Frequency filter failed: {e}")
+                        pcm = (np.clip(filtered_buffer, -1.0, 1.0) * 32767.0).astype(np.int16)
                         pcm_bytes = pcm.tobytes()
                         
                         # Encode with Opus (like C code: opus_encode(encoder, pcm, 1920, opus_data, sizeof(opus_data)))
