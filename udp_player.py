@@ -532,8 +532,8 @@ class UDPPlayer:
                                     channel_id, filtered_audio
                                 )
                                 if detected_tone:
-                                    print(f"[UDP] Tone sequence detected on channel {channel_id}: "
-                                          f"Tone ID={detected_tone.get('tone_id', 'unknown')}")
+                                    print(f"\n[UDP] *** TONE SEQUENCE DETECTED ON CHANNEL {channel_id} ***")
+                                    print(f"[UDP] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n")
                             except Exception as e:
                                 if send_count <= 10:
                                     print(f"[AUDIO TX] WARNING: Tone detection "

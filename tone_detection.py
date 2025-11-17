@@ -256,22 +256,28 @@ class ChannelToneDetector:
                                                          tone_def["tone_b_range"])),
                                 None
                             )
-                            print("=" * 60)
-                            print("[TONE SEQUENCE DETECTED!]")
-                            print(f"  Channel: {self.channel_id}")
-                            print(f"  Tone ID: {tone_def['tone_id']}")
-                            print(f"  Tone A: {tone_def['tone_a']:.1f} Hz "
-                                  f"±{tone_def['tone_a_range']} Hz "
-                                  f"({tone_def['tone_a_length_ms']} ms required)")
-                            print(f"  Tone B: {matching_freq_b:.1f} Hz detected "
-                                  f"(target: {tone_def['tone_b']:.1f} Hz "
-                                  f"±{tone_def['tone_b_range']} Hz), "
-                                  f"Duration: {duration} ms "
+                            print("\n" + "=" * 80)
+                            print(" " * 20 + "*** TONE SEQUENCE DETECTED! ***")
+                            print("=" * 80)
+                            print(f"  Channel ID:     {self.channel_id}")
+                            print(f"  Tone ID:        {tone_def['tone_id']}")
+                            print(f"  ")
+                            print(f"  Tone A Details:")
+                            print(f"    Frequency:    {tone_def['tone_a']:.1f} Hz "
+                                  f"±{tone_def['tone_a_range']} Hz")
+                            print(f"    Duration:     {tone_def['tone_a_length_ms']} ms (required)")
+                            print(f"  ")
+                            print(f"  Tone B Details:")
+                            print(f"    Detected:     {matching_freq_b:.1f} Hz")
+                            print(f"    Target:       {tone_def['tone_b']:.1f} Hz "
+                                  f"±{tone_def['tone_b_range']} Hz")
+                            print(f"    Duration:     {duration} ms "
                                   f"(required: {tone_def['tone_b_length_ms']} ms)")
-                            print(f"  Record Length: {tone_def['record_length_ms']} ms")
+                            print(f"  ")
+                            print(f"  Record Length:  {tone_def['record_length_ms']} ms")
                             if tone_def.get("detection_tone_alert"):
-                                print(f"  Alert Type: {tone_def['detection_tone_alert']}")
-                            print("=" * 60)
+                                print(f"  Alert Type:     {tone_def['detection_tone_alert']}")
+                            print("=" * 80 + "\n")
                             
                             self.tone_a_confirmed[tone_id] = False
                             self.tone_b_confirmed[tone_id] = False
