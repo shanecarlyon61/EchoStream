@@ -1,7 +1,3 @@
-"""
-Tone detection module - detects tone sequences (Tone A followed by Tone B)
-from filtered audio on channels with tone_detect enabled.
-"""
 import numpy as np
 import threading
 import time
@@ -11,15 +7,12 @@ from numpy.fft import rfft
 SAMPLE_RATE = 48000
 FFT_SIZE = 1024
 FREQ_BINS = FFT_SIZE // 2
-HIT_REQUIRED = 1      # require K hits (reduced from 2 to 1 for faster confirmation)
-MISS_REQUIRED = 3     # require K misses (increased from 2 to 3 for stability)
-GRACE_MS = 500        # allow brief gaps without resetting (increased from 250ms)
+HIT_REQUIRED = 1
+MISS_REQUIRED = 3
+GRACE_MS = 500
 
 
 def parabolic(f, x):
-    """Quadratic interpolation for estimating the true position of an
-    inter-sample maximum when nearby samples are known.
-    """
     if x == 0 or x == len(f) - 1:
         return float(x), float(f[x])
     try:
@@ -31,18 +24,14 @@ def parabolic(f, x):
 
 
 def frequency_to_bin(frequency: float) -> float:
-    """Convert frequency (Hz) to FFT bin index."""
     return (frequency * FFT_SIZE) / SAMPLE_RATE
 
 
 def is_frequency_in_range(detected_freq: float, target_freq: float, range_hz: int) -> bool:
-    """Check if detected frequency is within range of target"""
     return abs(detected_freq - target_freq) <= range_hz
 
 
 class ChannelToneDetector:
-    """Tone detector for a single channel"""
-    
     def __init__(self, channel_id: str, tone_definitions: List[Dict[str, Any]]):
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
@@ -79,14 +68,12 @@ class ChannelToneDetector:
             self.tone_b_last_seen[tone_id] = 0
         
     def add_audio_samples(self, samples: np.ndarray):
-        """Add audio samples to the buffer"""
         with self.mutex:
             self.audio_buffer.extend(samples.tolist())
             if len(self.audio_buffer) > self.max_buffer_samples:
                 self.audio_buffer = self.audio_buffer[-self.max_buffer_samples:]
     
     def _find_peak_frequencies(self, audio_samples: np.ndarray) -> List[float]:
-        """Perform FFT and find peak frequencies using parabolic interpolation"""
         if len(audio_samples) < FFT_SIZE:
             return []
         
@@ -120,17 +107,12 @@ class ChannelToneDetector:
         return sorted(peaks)
     
     def _check_tone_frequency(self, peak_freqs: List[float], target_freq: float, range_hz: int) -> bool:
-        """Check if any peak frequency matches the target frequency within range"""
         for peak_freq in peak_freqs:
             if is_frequency_in_range(peak_freq, target_freq, range_hz):
                 return True
         return False
     
     def process_audio(self) -> Optional[Dict[str, Any]]:
-        """
-        Process audio buffer and detect tone sequences.
-        Returns tone definition dict if sequence detected, None otherwise.
-        """
         with self.mutex:
             if len(self.audio_buffer) < FFT_SIZE:
                 return None
@@ -360,7 +342,6 @@ _detectors_mutex = threading.Lock()
 
 
 def init_channel_detector(channel_id: str, tone_definitions: List[Dict[str, Any]]) -> None:
-    """Initialize tone detector for a channel"""
     with _detectors_mutex:
         if tone_definitions:
             _channel_detectors[channel_id] = ChannelToneDetector(channel_id, tone_definitions)
@@ -382,10 +363,6 @@ def init_channel_detector(channel_id: str, tone_definitions: List[Dict[str, Any]
 
 
 def process_audio_for_channel(channel_id: str, filtered_audio: np.ndarray) -> Optional[Dict[str, Any]]:
-    """
-    Process filtered audio samples for a specific channel.
-    Returns tone definition dict if sequence detected, None otherwise.
-    """
     with _detectors_mutex:
         detector = _channel_detectors.get(channel_id)
         if not detector:
