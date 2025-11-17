@@ -56,6 +56,15 @@ class UDPPlayer:
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
         with self._lock:
             if channel_index in self._streams:
+                bundle = self._streams[channel_index]
+                stream = bundle.get("stream")
+                # Ensure stream is started
+                if stream and hasattr(stream, 'is_active') and not stream.is_active():
+                    try:
+                        stream.start_stream()  # type: ignore[attr-defined]
+                        print(f"[AUDIO] Started output stream for channel index {channel_index}")
+                    except Exception as e:
+                        print(f"[AUDIO] WARNING: Failed to start stream for channel {channel_index}: {e}")
                 return
             device_index = select_output_device_for_channel(channel_index)
             if device_index is None:
@@ -63,9 +72,15 @@ class UDPPlayer:
                 return
             pa, stream = open_output_stream(device_index)
             if pa is None or stream is None:
+                print(f"[AUDIO] ERROR: Failed to open output stream for channel index {channel_index}")
                 return
+            # Start the stream immediately
+            try:
+                stream.start_stream()  # type: ignore[attr-defined]
+            except Exception as e:
+                print(f"[AUDIO] WARNING: Failed to start stream: {e}")
             self._streams[channel_index] = {"pa": pa, "stream": stream}  # keep PA for lifecycle consistency
-            print(f"[AUDIO] Output stream ready on device {device_index} for channel index {channel_index}")
+            print(f"[AUDIO] Output stream ready and started on device {device_index} for channel index {channel_index}")
 
     def set_channel_ids(self, channel_ids: List[str]) -> None:
         # Preserve order to map index
@@ -208,9 +223,17 @@ class UDPPlayer:
                 if bundle and pcm:
                     try:
                         stream = bundle["stream"]
+                        # Ensure stream is started
+                        if not stream.is_active():  # type: ignore[attr-defined]
+                            stream.start_stream()  # type: ignore[attr-defined]
+                        # Write PCM data (already in int16 format from decoder)
                         stream.write(pcm)  # type: ignore[attr-defined]
+                        if self._receive_count <= 10:
+                            print(f"[UDP] Wrote {len(pcm)} bytes PCM to channel {target_index} (channel_id: {ch_id})")
                     except Exception as e:
                         print(f"[UDP] WARNING: write failed for channel index {target_index}: {e}")
+                        import traceback
+                        traceback.print_exc()
                         
             except OSError as e:
                 if not self._running.is_set():

@@ -531,13 +531,16 @@ async def websocket_handler_async():
                                 # This tells the server to start sending audio packets
                                 print("[WEBSOCKET] UDP ready - resending transmit_started for active channels")
                                 if _AUDIO_OK:
+                                    # Use registered_channels or global_udp_player._channel_ids to get all channels
+                                    channel_ids_to_check = registered_channels if registered_channels else global_udp_player._channel_ids
                                     gpio_keys = list(GPIO_PINS.keys())
-                                    for idx, channel_id in enumerate(pending_register_ids):
+                                    for idx, channel_id in enumerate(channel_ids_to_check):
                                         if idx < len(gpio_keys):
                                             gpio_num = gpio_keys[idx]
                                             gpio_state = gpio_states.get(gpio_num, -1)
                                             if gpio_state == 0:  # GPIO is ACTIVE
                                                 print(f"[WEBSOCKET] Resending transmit_started for channel {channel_id} (GPIO {gpio_num} is ACTIVE, UDP now ready)")
+                                                # Send transmit event (this will trigger server to send audio)
                                                 send_transmit_event(channel_id, True)
                         else:
                             print(f"[WEBSOCKET] WARNING: Invalid UDP port: {udp_port}")
