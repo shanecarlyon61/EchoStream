@@ -236,26 +236,6 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
     except Exception as e:
         print(f"[WEBSOCKET] WARNING: Failed to send transmit event: {e}")
     return False
-                try:
-                    channel_index = global_udp_player._channel_ids.index(channel_id)
-                except ValueError:
-                    pass
-            
-            if channel_index is not None:
-                if active:
-                    if global_udp_player.start_transmission_for_channel(channel_index):
-                        print(f"[WEBSOCKET] Started audio transmission for channel {channel_id} (index {channel_index})")
-                    else:
-                        print(f"[WEBSOCKET] WARNING: Failed to start audio transmission for channel {channel_id}")
-                else:
-                    global_udp_player.stop_transmission_for_channel(channel_index)
-                    print(f"[WEBSOCKET] Stopped audio transmission for channel {channel_id} (index {channel_index})")
-        except Exception as e:
-            print(f"[WEBSOCKET] WARNING: Failed to start/stop audio transmission: {e}")
-        
-        return True
-
-    return False
 
 def send_connect_message(channel_id: str) -> bool:
     try:
