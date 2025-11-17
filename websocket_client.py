@@ -527,9 +527,9 @@ async def websocket_handler_async():
                         if udp_port > 0:
                             print(f"[WEBSOCKET] Starting UDP player: port={udp_port}, host={udp_host}, aes_key={'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}")
                             if global_udp_player.start(udp_port=udp_port, host_hint=udp_host, aes_key_b64=aes_key):
-                                # UDP is now ready - resend transmit_started for any channels with active GPIO
-                                # This tells the server to start sending audio packets
-                                print("[WEBSOCKET] UDP ready - resending transmit_started for active channels")
+                                # UDP is now ready - start audio transmission for channels with active GPIO
+                                # This matches C code: start_transmission_for_channel when UDP is ready
+                                print("[WEBSOCKET] UDP ready - starting audio transmission for active channels")
                                 if _AUDIO_OK:
                                     # Use registered_channels or global_udp_player._channel_ids to get all channels
                                     channel_ids_to_check = registered_channels if registered_channels else global_udp_player._channel_ids
@@ -539,8 +539,13 @@ async def websocket_handler_async():
                                             gpio_num = gpio_keys[idx]
                                             gpio_state = gpio_states.get(gpio_num, -1)
                                             if gpio_state == 0:  # GPIO is ACTIVE
-                                                print(f"[WEBSOCKET] Resending transmit_started for channel {channel_id} (GPIO {gpio_num} is ACTIVE, UDP now ready)")
-                                                # Send transmit event (this will trigger server to send audio)
+                                                print(f"[WEBSOCKET] Starting audio transmission for channel {channel_id} (GPIO {gpio_num} is ACTIVE, UDP now ready)")
+                                                # Start transmission (this opens input stream and starts sending audio)
+                                                if global_udp_player.start_transmission_for_channel(idx):
+                                                    print(f"[WEBSOCKET] ✓ Audio transmission started for channel {channel_id}")
+                                                else:
+                                                    print(f"[WEBSOCKET] ✗ Failed to start audio transmission for channel {channel_id}")
+                                                # Also resend transmit_started event to server
                                                 send_transmit_event(channel_id, True)
                         else:
                             print(f"[WEBSOCKET] WARNING: Invalid UDP port: {udp_port}")
