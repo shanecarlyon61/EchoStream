@@ -562,10 +562,12 @@ class UDPPlayer:
                                     print(f"[AUDIO TX] WARNING: Tone detection "
                                           f"failed: {e}")
                         
+                        passthrough_active = False
                         if HAS_PASSTHROUGH and global_passthrough_manager:
                             try:
                                 global_passthrough_manager.cleanup_expired_sessions()
                                 if global_passthrough_manager.is_active(channel_id):
+                                    passthrough_active = True
                                     global_passthrough_manager.route_audio(channel_id, audio_chunk)
                             except Exception as e:
                                 if send_count % 100 == 0:
@@ -597,6 +599,7 @@ class UDPPlayer:
                                         b64_data = base64.b64encode(encrypted_with_iv).decode('utf-8')
                                         
                                         # Send via UDP (like C code)
+                                        # IMPORTANT: Continue broadcasting to UDP server even during passthrough
                                         if self._sock and self._server_addr:
                                             msg = json.dumps({
                                                 "channel_id": channel_id,
@@ -606,6 +609,8 @@ class UDPPlayer:
                                             self._sock.sendto(msg.encode('utf-8'), self._server_addr)  # nosec
                                             
                                             send_count += 1
+                                            if passthrough_active and send_count % 100 == 0:
+                                                print(f"[AUDIO TX] Channel {channel_id}: Broadcasting to UDP server (packet #{send_count}, passthrough active)")
                                             # if send_count <= 5 or send_count % 500 == 0:
                                                 # print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
                                                 #       f"({len(msg)} bytes) to {self._server_addr}")
