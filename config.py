@@ -185,3 +185,33 @@ def get_new_tone_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
         print(f"[CONFIG] ERROR: Failed to get new tone config for {channel_id}: {e}")
     return result
 
+
+def get_passthrough_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
+    result = {
+        "tone_passthrough": False,
+        "passthrough_channel": ""
+    }
+    try:
+        sw_cfg_list = (
+            cfg.get("shadow", {})
+               .get("state", {})
+               .get("desired", {})
+               .get("software_configuration", [])
+        )
+        if not sw_cfg_list:
+            return result
+        item = sw_cfg_list[0]
+        for key in ("channel_one", "channel_two", "channel_three", "channel_four"):
+            ch = item.get(key, {})
+            ch_id_from_cfg = ch.get("channel_id", "")
+            if ch_id_from_cfg != channel_id:
+                continue
+            tone_detect_config = ch.get("tone_detect_configuration", {})
+            if tone_detect_config:
+                result["tone_passthrough"] = bool(tone_detect_config.get("tone_passthrough", False))
+                result["passthrough_channel"] = str(tone_detect_config.get("passthrough_channel", ""))
+            break
+    except Exception as e:
+        print(f"[CONFIG] ERROR: Failed to get passthrough config for {channel_id}: {e}")
+    return result
+

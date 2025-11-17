@@ -31,23 +31,28 @@ except Exception:
     HAS_OPUS = False
 
 try:
-    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config
+    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config
     from frequency_filter import apply_audio_frequency_filters
     from tone_detection import init_channel_detector, process_audio_for_channel
+    from passthrough import global_passthrough_manager
     HAS_FREQ_FILTER = True
     HAS_TONE_DETECT = True
+    HAS_PASSTHROUGH = True
 except Exception as e:
     print(f"[UDP] WARNING: Frequency filtering/tone detection not available: {e}")
     HAS_FREQ_FILTER = False
     HAS_TONE_DETECT = False
+    HAS_PASSTHROUGH = False
     load_config = None
     get_frequency_filters = None
     get_tone_detect_config = None
     get_tone_definitions = None
     get_new_tone_config = None
+    get_passthrough_config = None
     apply_audio_frequency_filters = None
     init_channel_detector = None
     process_audio_for_channel = None
+    global_passthrough_manager = None
 
 
 class UDPPlayer:
@@ -107,6 +112,8 @@ class UDPPlayer:
     def set_channel_ids(self, channel_ids: List[str]) -> None:
         # Preserve order to map index
         self._channel_ids = [str(c).strip() for c in channel_ids if str(c).strip()]
+        if HAS_PASSTHROUGH and global_passthrough_manager:
+            global_passthrough_manager.set_channel_mapping(self._channel_ids)
         self._load_frequency_filters()
     
     def _load_frequency_filters(self) -> None:
@@ -136,8 +143,11 @@ class UDPPlayer:
                         new_tone_cfg = None
                         if get_new_tone_config:
                             new_tone_cfg = get_new_tone_config(self._config_cache, channel_id)
+                        passthrough_cfg = None
+                        if get_passthrough_config:
+                            passthrough_cfg = get_passthrough_config(self._config_cache, channel_id)
                         if tone_defs or (new_tone_cfg and new_tone_cfg.get("detect_new_tones", False)):
-                            init_channel_detector(channel_id, tone_defs, new_tone_cfg)
+                            init_channel_detector(channel_id, tone_defs, new_tone_cfg, passthrough_cfg)
                             print(f"[UDP] Initialized tone detection for channel {channel_id} "
                                   f"with {len(tone_defs)} tone definition(s)")
                         else:
@@ -542,6 +552,15 @@ class UDPPlayer:
                                 if send_count <= 10:
                                     print(f"[AUDIO TX] WARNING: Tone detection "
                                           f"failed: {e}")
+                        
+                        if HAS_PASSTHROUGH and global_passthrough_manager:
+                            try:
+                                global_passthrough_manager.cleanup_expired_sessions()
+                                if global_passthrough_manager.is_active(channel_id):
+                                    global_passthrough_manager.route_audio(channel_id, audio_chunk)
+                            except Exception as e:
+                                if send_count % 100 == 0:
+                                    print(f"[AUDIO TX] WARNING: Passthrough failed: {e}")
                         
                         pcm = (np.clip(audio_chunk, -1.0, 1.0) * 32767.0).astype(
                             np.int16

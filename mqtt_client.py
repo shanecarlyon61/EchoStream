@@ -214,7 +214,7 @@ def publish_known_tone_detection(
     
     try:
         message_id = generate_uuid()
-        timestamp = int(time.time())
+        timestamp = int(time.time() * 1000)
         
         device_id = get_device_id_from_config()
         if not device_id:
@@ -249,5 +249,58 @@ def publish_known_tone_detection(
         return result
     except Exception as e:
         print(f"[MQTT] ERROR: Exception in publish_known_tone_detection: {e}")
+        return False
+
+def publish_new_tone_pair(tone_a_hz: float, tone_b_hz: float) -> bool:
+    if not global_mqtt.initialized or not global_mqtt.client:
+        device_id = get_device_id_from_config()
+        if device_id:
+            broker = "a1d6e0zlehb0v9-ats.iot.us-west-2.amazonaws.com"
+            port = 8883
+            print(f"[MQTT] Attempting to connect to AWS IoT Core: {broker}:{port}")
+            if not init_mqtt(device_id, broker, port):
+                print("[MQTT] Failed to initialize MQTT connection - tone pair logged but not published")
+                return False
+        else:
+            print("[MQTT] Cannot publish: MQTT not initialized and device_id not available")
+            return False
+    
+    try:
+        message_id = generate_uuid()
+        timestamp = int(time.time() * 1000)
+        
+        device_id = get_device_id_from_config()
+        if not device_id:
+            device_id = global_mqtt.device_id
+        if not device_id:
+            print("[MQTT] ERROR: Cannot determine device_id (unique_id) for topic")
+            return False
+        
+        payload = {
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "device_id": device_id,
+            "event_type": "new_tone_detected",
+            "tone_details": {
+                "tone_a": tone_a_hz,
+                "tone_b": tone_b_hz
+            }
+        }
+        
+        topic = f"from/device/{device_id}/tone_detection"
+        json_payload = json.dumps(payload, separators=(',', ':'))
+        
+        result = mqtt_publish(topic, json_payload)
+        
+        if result:
+            print(f"[MQTT] ✓ Published new tone pair to '{topic}': "
+                  f"A={tone_a_hz:.1f} Hz, B={tone_b_hz:.1f} Hz")
+            print(f"[MQTT]   Message payload: {json_payload}")
+        else:
+            print(f"[MQTT] ✗ Failed to publish new tone pair to '{topic}'")
+        
+        return result
+    except Exception as e:
+        print(f"[MQTT] ERROR: Exception in publish_new_tone_pair: {e}")
         return False
 

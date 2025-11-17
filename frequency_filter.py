@@ -79,7 +79,7 @@ def apply_audio_frequency_filters(
                 if target_bin_int < len(fft_output):
                     fft_output[target_bin_int:] = 0.0
             elif filter_type == "center":
-                mask = np.abs(np.arange(len(fft_output)) - target_bin_int) > range_bins
+                mask = np.abs(np.arange(len(fft_output)) - target_bin_int) <= range_bins
                 fft_output[mask] = 0.0
         
         filtered_samples = np.fft.irfft(fft_output, n=FFT_SIZE)

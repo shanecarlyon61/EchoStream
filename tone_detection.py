@@ -43,7 +43,7 @@ def is_frequency_in_range(detected_freq: float, target_freq: float, range_hz: in
 
 
 class ChannelToneDetector:
-    def __init__(self, channel_id: str, tone_definitions: List[Dict[str, Any]], new_tone_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, channel_id: str, tone_definitions: List[Dict[str, Any]], new_tone_config: Optional[Dict[str, Any]] = None, passthrough_config: Optional[Dict[str, Any]] = None):
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
         self.audio_buffer: List[float] = []
@@ -55,6 +55,10 @@ class ChannelToneDetector:
         self.detect_new_tones = new_tone_config.get("detect_new_tones", False)
         self.new_tone_length_ms = new_tone_config.get("new_tone_length_ms", 1000)
         self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
+        
+        if passthrough_config is None:
+            passthrough_config = {"tone_passthrough": False, "passthrough_channel": ""}
+        self.passthrough_config = passthrough_config
         
         self.tone_a_tracking: Dict[str, bool] = {}
         self.tone_b_tracking: Dict[str, bool] = {}
@@ -318,6 +322,19 @@ class ChannelToneDetector:
                                         detection_tone_alert=tone_def.get("detection_tone_alert")
                                     )
                                 
+                                try:
+                                    from passthrough import global_passthrough_manager
+                                    if hasattr(self, 'passthrough_config') and self.passthrough_config.get("tone_passthrough", False):
+                                        target_channel = self.passthrough_config.get("passthrough_channel", "")
+                                        record_length_ms = tone_def.get("record_length_ms", 0)
+                                        if target_channel and record_length_ms > 0:
+                                            global_passthrough_manager.start_passthrough(
+                                                self.channel_id, target_channel, record_length_ms
+                                            )
+                                            print(f"[PASSTHROUGH] Triggered: {self.channel_id} -> {target_channel}, duration={record_length_ms} ms")
+                                except Exception as e:
+                                    print(f"[PASSTHROUGH] ERROR: Failed to trigger passthrough: {e}")
+                                
                                 self.tone_a_confirmed[tone_id] = False
                                 self.tone_b_confirmed[tone_id] = False
                                 self.tone_a_tracking[tone_id] = False
@@ -504,16 +521,18 @@ _channel_detectors: Dict[str, ChannelToneDetector] = {}
 _detectors_mutex = threading.Lock()
 
 
-def init_channel_detector(channel_id: str, tone_definitions: List[Dict[str, Any]], new_tone_config: Optional[Dict[str, Any]] = None) -> None:
+def init_channel_detector(channel_id: str, tone_definitions: List[Dict[str, Any]], new_tone_config: Optional[Dict[str, Any]] = None, passthrough_config: Optional[Dict[str, Any]] = None) -> None:
     with _detectors_mutex:
         if tone_definitions or (new_tone_config and new_tone_config.get("detect_new_tones", False)):
-            _channel_detectors[channel_id] = ChannelToneDetector(channel_id, tone_definitions, new_tone_config)
+            _channel_detectors[channel_id] = ChannelToneDetector(channel_id, tone_definitions, new_tone_config, passthrough_config)
             print(f"[TONE DETECTION] Initialized detector for channel {channel_id} "
                   f"with {len(tone_definitions)} tone definition(s)")
             if new_tone_config and new_tone_config.get("detect_new_tones", False):
                 print(f"[TONE DETECTION] New tone detection enabled: "
                       f"length={new_tone_config.get('new_tone_length_ms', 1000)} ms, "
                       f"range=±{new_tone_config.get('new_tone_range_hz', 3)} Hz")
+            if passthrough_config and passthrough_config.get("tone_passthrough", False):
+                print(f"[TONE DETECTION] Passthrough enabled: target={passthrough_config.get('passthrough_channel', 'N/A')}")
             for i, tone_def in enumerate(tone_definitions, 1):
                 print(f"[TONE DETECTION]   Definition {i}:")
                 print(f"    Tone ID: {tone_def.get('tone_id', 'N/A')}")
