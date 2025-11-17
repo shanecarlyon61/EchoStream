@@ -49,7 +49,7 @@ def get_device_id_from_config() -> Optional[str]:
     return None
 
 def find_certificates():
-    cert_dir = os.path.expanduser("~/.an/certs")
+    cert_dir = os.path.expanduser("~/.an")
     ca_cert = os.path.join(cert_dir, "AmazonRootCA1.pem")
     client_cert = os.path.join(cert_dir, "certificate.pem.crt")
     client_key = os.path.join(cert_dir, "private.pem.key")
