@@ -503,6 +503,11 @@ class UDPPlayer:
         send_count = 0
         read_count = 0
         
+        if send_count == 0:
+            print(f"[AUDIO TX] Worker started for channel {channel_id} (index {channel_index})")
+            print(f"[AUDIO TX] Transmission flag: {self._transmitting.get(channel_index, False)}")
+            print(f"[AUDIO TX] Running flag: {self._running.is_set()}")
+        
         while self._running.is_set() and self._transmitting.get(channel_index, False):
             # Check GPIO state - only send when GPIO is active (value 0)
             try:
@@ -512,6 +517,8 @@ class UDPPlayer:
                     gpio_num = gpio_keys[channel_index]
                     gpio_state = gpio_states.get(gpio_num, -1)
                     if gpio_state != 0:  # GPIO not active
+                        if send_count == 0:
+                            print(f"[AUDIO TX] Channel {channel_id}: GPIO {gpio_num} not active (state={gpio_state}), waiting...")
                         time.sleep(0.1)
                         continue
             except Exception as e:
@@ -609,14 +616,19 @@ class UDPPlayer:
                                             self._sock.sendto(msg.encode('utf-8'), self._server_addr)  # nosec
                                             
                                             send_count += 1
-                                            if passthrough_active and send_count % 100 == 0:
+                                            if send_count <= 5 or send_count % 500 == 0:
+                                                print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
+                                                      f"({len(msg)} bytes) to {self._server_addr}, passthrough={'active' if passthrough_active else 'inactive'}")
+                                            elif passthrough_active and send_count % 100 == 0:
                                                 print(f"[AUDIO TX] Channel {channel_id}: Broadcasting to UDP server (packet #{send_count}, passthrough active)")
-                                            # if send_count <= 5 or send_count % 500 == 0:
-                                                # print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
-                                                #       f"({len(msg)} bytes) to {self._server_addr}")
+                                        else:
+                                            if send_count <= 10:
+                                                print(f"[AUDIO TX ERROR] Channel {channel_id}: Cannot send - sock={self._sock is not None}, addr={self._server_addr}")
                                     except Exception as e:
                                         if send_count <= 10:
                                             print(f"[AUDIO TX ERROR] Channel {channel_id}: Encryption/send failed: {e}")
+                                            import traceback
+                                            traceback.print_exc()
                                 else:
                                     if send_count <= 10:
                                         print(f"[AUDIO TX ERROR] Channel {channel_id}: No AES key available")

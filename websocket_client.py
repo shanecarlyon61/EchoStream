@@ -613,38 +613,38 @@ def global_websocket_thread(url: str):
     asyncio.set_event_loop(ws_event_loop)
 
     try:
-
+        print("[WEBSOCKET] Attempting initial connection...")
         try:
             ws_event_loop.run_until_complete(connect_to_server_async(url))
         except Exception as e:
-            print(f"[WEBSOCKET] ERROR: Failed to connect: {e}")
-            return
-
-        if not ws_connected:
-            print("[WEBSOCKET] ERROR: Connection not established, thread exiting")
-            return
-
-        print("[WEBSOCKET] WebSocket connection established - sending connect messages for all configured channels")
-        
-        try:
-            if pending_register_ids:
-                print(f"[WEBSOCKET] Sending connect messages for {len(pending_register_ids)} configured channel(s)")
-                for ch_id in list(pending_register_ids):
-                    if send_connect_message(ch_id):
-                        if ch_id not in registered_channels:
-                            registered_channels.append(ch_id)
-                        print(f"[WEBSOCKET] ✓ Connect message sent for channel {ch_id}")
-                    else:
-                        print(f"[WEBSOCKET] ✗ Failed to send connect message for channel {ch_id}")
-                pending_register_ids.clear()
-                print(f"[WEBSOCKET] All connect messages sent. Registered channels: {registered_channels}")
-            else:
-                print("[WEBSOCKET] WARNING: No channels configured (pending_register_ids is empty)")
-        except Exception as e:
-            print(f"[WEBSOCKET] ERROR: Failed to send connect messages: {e}")
+            print(f"[WEBSOCKET] ERROR: Failed initial connect: {e}")
             import traceback
             traceback.print_exc()
 
+        if ws_connected:
+            print("[WEBSOCKET] Initial connection successful - sending connect messages for all configured channels")
+            try:
+                if pending_register_ids:
+                    print(f"[WEBSOCKET] Sending connect messages for {len(pending_register_ids)} configured channel(s)")
+                    for ch_id in list(pending_register_ids):
+                        if send_connect_message(ch_id):
+                            if ch_id not in registered_channels:
+                                registered_channels.append(ch_id)
+                            print(f"[WEBSOCKET] ✓ Connect message sent for channel {ch_id}")
+                        else:
+                            print(f"[WEBSOCKET] ✗ Failed to send connect message for channel {ch_id}")
+                    pending_register_ids.clear()
+                    print(f"[WEBSOCKET] All connect messages sent. Registered channels: {registered_channels}")
+                else:
+                    print("[WEBSOCKET] WARNING: No channels configured (pending_register_ids is empty)")
+            except Exception as e:
+                print(f"[WEBSOCKET] ERROR: Failed to send connect messages: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("[WEBSOCKET] WARNING: Initial connection failed, will retry in handler")
+
+        print("[WEBSOCKET] Starting WebSocket handler (with reconnection)...")
         ws_event_loop.run_until_complete(websocket_handler_async(url))
 
     except Exception as e:
