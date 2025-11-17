@@ -31,7 +31,7 @@ except Exception:
     HAS_OPUS = False
 
 try:
-    from config import load_config, get_frequency_filters
+    from config import load_config, get_frequency_filters, get_tone_detect_config
     from frequency_filter import apply_audio_frequency_filters
     HAS_FREQ_FILTER = True
 except Exception as e:
@@ -39,6 +39,7 @@ except Exception as e:
     HAS_FREQ_FILTER = False
     load_config = None
     get_frequency_filters = None
+    get_tone_detect_config = None
     apply_audio_frequency_filters = None
 
 
@@ -64,6 +65,7 @@ class UDPPlayer:
         # If ES_UDP_HEARTBEAT_LOG=0, completely suppress heartbeat logs
         self._suppress_hb_log = os.getenv("ES_UDP_HEARTBEAT_LOG", "1") == "0"
         self._frequency_filters: Dict[str, List[Dict[str, Any]]] = {}
+        self._tone_detect_enabled: Dict[str, bool] = {}
         self._config_cache: Optional[Dict[str, Any]] = None
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
@@ -107,11 +109,20 @@ class UDPPlayer:
             if self._config_cache is None:
                 self._config_cache = load_config()
             self._frequency_filters.clear()
+            self._tone_detect_enabled.clear()
+            tone_detect_map = {}
+            if get_tone_detect_config:
+                tone_detect_map = dict(get_tone_detect_config(self._config_cache))
             for channel_id in self._channel_ids:
-                filters = get_frequency_filters(self._config_cache, channel_id)
-                if filters:
-                    self._frequency_filters[channel_id] = filters
-                    print(f"[UDP] Loaded {len(filters)} frequency filter(s) for channel {channel_id}")
+                is_tone_detect_enabled = tone_detect_map.get(channel_id, False)
+                self._tone_detect_enabled[channel_id] = is_tone_detect_enabled
+                if is_tone_detect_enabled:
+                    filters = get_frequency_filters(self._config_cache, channel_id)
+                    if filters:
+                        self._frequency_filters[channel_id] = filters
+                        print(f"[UDP] Loaded {len(filters)} frequency filter(s) for tone detection on channel {channel_id}")
+                    else:
+                        self._frequency_filters[channel_id] = []
                 else:
                     self._frequency_filters[channel_id] = []
         except Exception as e:
