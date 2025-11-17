@@ -111,7 +111,7 @@ class ChannelToneDetector:
                     freq = SAMPLE_RATE * i / FFT_SIZE
                     peaks.append(freq)
         
-        return peaks
+        return sorted(peaks)
     
     def _check_tone_frequency(self, peak_freqs: List[float], target_freq: float, range_hz: int) -> bool:
         """Check if any peak frequency matches the target frequency within range"""
@@ -133,6 +133,14 @@ class ChannelToneDetector:
             current_time_ms = int(time.time() * 1000)
             
             peak_freqs = self._find_peak_frequencies(buffer_array)
+            
+            if not hasattr(self, '_debug_count'):
+                self._debug_count = 0
+            self._debug_count += 1
+            if self._debug_count % 200 == 0 and peak_freqs:
+                print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                      f"Found {len(peak_freqs)} peak frequency(ies): "
+                      f"{', '.join(f'{f:.1f} Hz' for f in peak_freqs[:5])}")
             
             for tone_def in self.tone_definitions:
                 tone_id = tone_def["tone_id"]
@@ -159,6 +167,21 @@ class ChannelToneDetector:
                             if not self.tone_a_tracking.get(tone_id, False):
                                 self.tone_a_tracking[tone_id] = True
                                 self.tone_a_tracking_start[tone_id] = current_time_ms
+                                print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                      f"Tone A detected! Starting duration tracking for "
+                                      f"{tone_def['tone_a']:.1f} Hz ±{tone_def['tone_a_range']} Hz "
+                                      f"(need {tone_def['tone_a_length_ms']} ms)")
+                        elif self.tone_a_hit_streak[tone_id] == 1:
+                            matching_freq = next(
+                                (f for f in peak_freqs 
+                                 if is_frequency_in_range(f, tone_def["tone_a"], 
+                                                         tone_def["tone_a_range"])),
+                                None
+                            )
+                            if matching_freq:
+                                print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                      f"Tone A frequency detected: {matching_freq:.1f} Hz "
+                                      f"(target: {tone_def['tone_a']:.1f} Hz ±{tone_def['tone_a_range']} Hz)")
                     else:
                         self.tone_a_miss_streak[tone_id] = self.tone_a_miss_streak.get(tone_id, 0) + 1
                         if self.tone_a_miss_streak[tone_id] >= HIT_REQUIRED:
@@ -172,9 +195,19 @@ class ChannelToneDetector:
                         duration = current_time_ms - self.tone_a_tracking_start[tone_id]
                         if duration >= tone_def["tone_a_length_ms"]:
                             self.tone_a_confirmed[tone_id] = True
-                            print(f"[TONE CONFIRMED] Tone A confirmed! "
-                                  f"({tone_def['tone_a']:.1f} Hz ±{tone_def['tone_a_range']} Hz, "
-                                  f"{duration} ms duration)")
+                            matching_freq = next(
+                                (f for f in peak_freqs 
+                                 if is_frequency_in_range(f, tone_def["tone_a"], 
+                                                         tone_def["tone_a_range"])),
+                                None
+                            )
+                            print(f"[TONE CONFIRMED] Channel {self.channel_id}: "
+                                  f"Tone A confirmed! "
+                                  f"Frequency: {matching_freq:.1f} Hz "
+                                  f"(target: {tone_def['tone_a']:.1f} Hz ±{tone_def['tone_a_range']} Hz), "
+                                  f"Duration: {duration} ms "
+                                  f"(required: {tone_def['tone_a_length_ms']} ms), "
+                                  f"Tone ID: {tone_id}")
                 
                 elif not self.tone_b_confirmed.get(tone_id, False):
                     tone_b_detected = self._check_tone_frequency(
@@ -189,6 +222,21 @@ class ChannelToneDetector:
                             if not self.tone_b_tracking.get(tone_id, False):
                                 self.tone_b_tracking[tone_id] = True
                                 self.tone_b_tracking_start[tone_id] = current_time_ms
+                                print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                      f"Tone B detected! Starting duration tracking for "
+                                      f"{tone_def['tone_b']:.1f} Hz ±{tone_def['tone_b_range']} Hz "
+                                      f"(need {tone_def['tone_b_length_ms']} ms)")
+                        elif self.tone_b_hit_streak[tone_id] == 1:
+                            matching_freq = next(
+                                (f for f in peak_freqs 
+                                 if is_frequency_in_range(f, tone_def["tone_b"], 
+                                                         tone_def["tone_b_range"])),
+                                None
+                            )
+                            if matching_freq:
+                                print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                      f"Tone B frequency detected: {matching_freq:.1f} Hz "
+                                      f"(target: {tone_def['tone_b']:.1f} Hz ±{tone_def['tone_b_range']} Hz)")
                     else:
                         self.tone_b_miss_streak[tone_id] = self.tone_b_miss_streak.get(tone_id, 0) + 1
                         if self.tone_b_miss_streak[tone_id] >= HIT_REQUIRED:
@@ -202,16 +250,24 @@ class ChannelToneDetector:
                         duration = current_time_ms - self.tone_b_tracking_start[tone_id]
                         if duration >= tone_def["tone_b_length_ms"]:
                             self.tone_b_confirmed[tone_id] = True
+                            matching_freq_b = next(
+                                (f for f in peak_freqs 
+                                 if is_frequency_in_range(f, tone_def["tone_b"], 
+                                                         tone_def["tone_b_range"])),
+                                None
+                            )
                             print("=" * 60)
                             print("[TONE SEQUENCE DETECTED!]")
                             print(f"  Channel: {self.channel_id}")
                             print(f"  Tone ID: {tone_def['tone_id']}")
                             print(f"  Tone A: {tone_def['tone_a']:.1f} Hz "
                                   f"±{tone_def['tone_a_range']} Hz "
-                                  f"({tone_def['tone_a_length_ms']} ms)")
-                            print(f"  Tone B: {tone_def['tone_b']:.1f} Hz "
-                                  f"±{tone_def['tone_b_range']} Hz "
-                                  f"({tone_def['tone_b_length_ms']} ms)")
+                                  f"({tone_def['tone_a_length_ms']} ms required)")
+                            print(f"  Tone B: {matching_freq_b:.1f} Hz detected "
+                                  f"(target: {tone_def['tone_b']:.1f} Hz "
+                                  f"±{tone_def['tone_b_range']} Hz), "
+                                  f"Duration: {duration} ms "
+                                  f"(required: {tone_def['tone_b_length_ms']} ms)")
                             print(f"  Record Length: {tone_def['record_length_ms']} ms")
                             if tone_def.get("detection_tone_alert"):
                                 print(f"  Alert Type: {tone_def['detection_tone_alert']}")
@@ -242,8 +298,19 @@ def init_channel_detector(channel_id: str, tone_definitions: List[Dict[str, Any]
             _channel_detectors[channel_id] = ChannelToneDetector(channel_id, tone_definitions)
             print(f"[TONE DETECTION] Initialized detector for channel {channel_id} "
                   f"with {len(tone_definitions)} tone definition(s)")
+            for i, tone_def in enumerate(tone_definitions, 1):
+                print(f"[TONE DETECTION]   Definition {i}:")
+                print(f"    Tone ID: {tone_def.get('tone_id', 'N/A')}")
+                print(f"    Tone A: {tone_def.get('tone_a', 0):.1f} Hz "
+                      f"±{tone_def.get('tone_a_range', 0)} Hz "
+                      f"({tone_def.get('tone_a_length_ms', 0)} ms)")
+                print(f"    Tone B: {tone_def.get('tone_b', 0):.1f} Hz "
+                      f"±{tone_def.get('tone_b_range', 0)} Hz "
+                      f"({tone_def.get('tone_b_length_ms', 0)} ms)")
+                print(f"    Record Length: {tone_def.get('record_length_ms', 0)} ms")
         else:
             _channel_detectors.pop(channel_id, None)
+            print(f"[TONE DETECTION] No tone definitions found for channel {channel_id}")
 
 
 def process_audio_for_channel(channel_id: str, filtered_audio: np.ndarray) -> Optional[Dict[str, Any]]:

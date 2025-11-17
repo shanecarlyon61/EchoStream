@@ -136,6 +136,9 @@ class UDPPlayer:
                             init_channel_detector(channel_id, tone_defs)
                             print(f"[UDP] Initialized tone detection for channel {channel_id} "
                                   f"with {len(tone_defs)} tone definition(s)")
+                        else:
+                            print(f"[UDP] WARNING: Tone detection enabled for channel {channel_id} "
+                                  f"but no tone definitions found in config.json")
                 else:
                     self._frequency_filters[channel_id] = []
         except Exception as e:
@@ -529,9 +532,8 @@ class UDPPlayer:
                                     channel_id, filtered_audio
                                 )
                                 if detected_tone:
-                                    print(f"[TONE DETECTION] Sequence detected on "
-                                          f"channel {channel_id}: "
-                                          f"{detected_tone.get('tone_id', 'unknown')}")
+                                    print(f"[UDP] Tone sequence detected on channel {channel_id}: "
+                                          f"Tone ID={detected_tone.get('tone_id', 'unknown')}")
                             except Exception as e:
                                 if send_count <= 10:
                                     print(f"[AUDIO TX] WARNING: Tone detection "
