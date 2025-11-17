@@ -4,6 +4,15 @@ import time
 from typing import Dict, List, Optional, Any
 from numpy.fft import rfft
 
+try:
+    from mqtt_client import publish_known_tone_detection
+    MQTT_AVAILABLE = True
+except ImportError:
+    MQTT_AVAILABLE = False
+    def publish_known_tone_detection(*args, **kwargs):
+        return False
+
+
 SAMPLE_RATE = 48000
 FFT_SIZE = 1024
 FREQ_BINS = FFT_SIZE // 2
@@ -274,6 +283,20 @@ class ChannelToneDetector:
                                     "=" * 80 + "\n"
                                 )
                                 print(confirmation_log, flush=True)
+                                
+                                if MQTT_AVAILABLE:
+                                    publish_known_tone_detection(
+                                        tone_id=tone_def["tone_id"],
+                                        tone_a_hz=tone_def["tone_a"],
+                                        tone_b_hz=tone_def["tone_b"],
+                                        tone_a_duration_ms=tone_def["tone_a_length_ms"],
+                                        tone_b_duration_ms=duration,
+                                        tone_a_range_hz=tone_def["tone_a_range"],
+                                        tone_b_range_hz=tone_def["tone_b_range"],
+                                        channel_id=self.channel_id,
+                                        record_length_ms=tone_def.get("record_length_ms", 0),
+                                        detection_tone_alert=tone_def.get("detection_tone_alert")
+                                    )
                                 
                                 self.tone_a_confirmed[tone_id] = False
                                 self.tone_b_confirmed[tone_id] = False
