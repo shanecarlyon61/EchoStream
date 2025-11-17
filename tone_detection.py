@@ -11,7 +11,9 @@ from numpy.fft import rfft
 SAMPLE_RATE = 48000
 FFT_SIZE = 1024
 FREQ_BINS = FFT_SIZE // 2
-HIT_REQUIRED = 3
+HIT_REQUIRED = 1      # require K hits (reduced from 2 to 1 for faster confirmation)
+MISS_REQUIRED = 3     # require K misses (increased from 2 to 3 for stability)
+GRACE_MS = 500        # allow brief gaps without resetting (increased from 250ms)
 
 
 def parabolic(f, x):
@@ -58,6 +60,8 @@ class ChannelToneDetector:
         self.tone_b_hit_streak: Dict[str, int] = {}
         self.tone_a_miss_streak: Dict[str, int] = {}
         self.tone_b_miss_streak: Dict[str, int] = {}
+        self.tone_a_last_seen: Dict[str, int] = {}
+        self.tone_b_last_seen: Dict[str, int] = {}
         
         for tone_def in tone_definitions:
             tone_id = tone_def["tone_id"]
@@ -71,6 +75,8 @@ class ChannelToneDetector:
             self.tone_b_hit_streak[tone_id] = 0
             self.tone_a_miss_streak[tone_id] = 0
             self.tone_b_miss_streak[tone_id] = 0
+            self.tone_a_last_seen[tone_id] = 0
+            self.tone_b_last_seen[tone_id] = 0
         
     def add_audio_samples(self, samples: np.ndarray):
         """Add audio samples to the buffer"""
@@ -162,6 +168,7 @@ class ChannelToneDetector:
                     if tone_a_detected:
                         self.tone_a_hit_streak[tone_id] = self.tone_a_hit_streak.get(tone_id, 0) + 1
                         self.tone_a_miss_streak[tone_id] = 0
+                        self.tone_a_last_seen[tone_id] = current_time_ms
                         
                         matching_freq = next(
                             (f for f in peak_freqs 
@@ -185,12 +192,15 @@ class ChannelToneDetector:
                                   f"[Hit streak: {self.tone_a_hit_streak[tone_id]}/{HIT_REQUIRED}]")
                     else:
                         self.tone_a_miss_streak[tone_id] = self.tone_a_miss_streak.get(tone_id, 0) + 1
-                        if self.tone_a_miss_streak[tone_id] >= HIT_REQUIRED:
+                        last_seen = self.tone_a_last_seen.get(tone_id, 0)
+                        time_since_last_seen = current_time_ms - last_seen
+                        if (time_since_last_seen > GRACE_MS and 
+                            self.tone_a_miss_streak[tone_id] >= MISS_REQUIRED):
                             old_hit_streak = self.tone_a_hit_streak.get(tone_id, 0)
                             self.tone_a_hit_streak[tone_id] = 0
                             if old_hit_streak > 0:
                                 print(f"[TONE DETECTION] Channel {self.channel_id}: "
-                                      f"Tone A hit streak reset (miss streak reached {HIT_REQUIRED})")
+                                      f"Tone A hit streak reset (miss streak reached {MISS_REQUIRED})")
                             if self.tone_a_tracking.get(tone_id, False):
                                 self.tone_a_tracking[tone_id] = False
                                 self.tone_a_tracking_start[tone_id] = 0
@@ -224,6 +234,7 @@ class ChannelToneDetector:
                     if tone_b_detected:
                         self.tone_b_hit_streak[tone_id] = self.tone_b_hit_streak.get(tone_id, 0) + 1
                         self.tone_b_miss_streak[tone_id] = 0
+                        self.tone_b_last_seen[tone_id] = current_time_ms
                         
                         matching_freq = next(
                             (f for f in peak_freqs 
@@ -247,12 +258,15 @@ class ChannelToneDetector:
                                   f"[Hit streak: {self.tone_b_hit_streak[tone_id]}/{HIT_REQUIRED}]")
                     else:
                         self.tone_b_miss_streak[tone_id] = self.tone_b_miss_streak.get(tone_id, 0) + 1
-                        if self.tone_b_miss_streak[tone_id] >= HIT_REQUIRED:
+                        last_seen = self.tone_b_last_seen.get(tone_id, 0)
+                        time_since_last_seen = current_time_ms - last_seen
+                        if (time_since_last_seen > GRACE_MS and 
+                            self.tone_b_miss_streak[tone_id] >= MISS_REQUIRED):
                             old_hit_streak = self.tone_b_hit_streak.get(tone_id, 0)
                             self.tone_b_hit_streak[tone_id] = 0
                             if old_hit_streak > 0:
                                 print(f"[TONE DETECTION] Channel {self.channel_id}: "
-                                      f"Tone B hit streak reset (miss streak reached {HIT_REQUIRED})")
+                                      f"Tone B hit streak reset (miss streak reached {MISS_REQUIRED})")
                             if self.tone_b_tracking.get(tone_id, False):
                                 self.tone_b_tracking[tone_id] = False
                                 self.tone_b_tracking_start[tone_id] = 0
@@ -275,19 +289,19 @@ class ChannelToneDetector:
                             print("=" * 80)
                             print(f"  Channel ID:     {self.channel_id}")
                             print(f"  Tone ID:        {tone_def['tone_id']}")
-                            print(f"  ")
-                            print(f"  Tone A Details:")
+                            print("  ")
+                            print("  Tone A Details:")
                             print(f"    Frequency:    {tone_def['tone_a']:.1f} Hz "
                                   f"±{tone_def['tone_a_range']} Hz")
                             print(f"    Duration:     {tone_def['tone_a_length_ms']} ms (required)")
-                            print(f"  ")
-                            print(f"  Tone B Details:")
+                            print("  ")
+                            print("  Tone B Details:")
                             print(f"    Detected:     {matching_freq_b:.1f} Hz")
                             print(f"    Target:       {tone_def['tone_b']:.1f} Hz "
                                   f"±{tone_def['tone_b_range']} Hz")
                             print(f"    Duration:     {duration} ms "
                                   f"(required: {tone_def['tone_b_length_ms']} ms)")
-                            print(f"  ")
+                            print("  ")
                             print(f"  Record Length:  {tone_def['record_length_ms']} ms")
                             if tone_def.get("detection_tone_alert"):
                                 print(f"  Alert Type:     {tone_def['detection_tone_alert']}")
