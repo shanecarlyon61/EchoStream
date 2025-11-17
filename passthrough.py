@@ -1,6 +1,7 @@
 import threading
 import time
 from typing import Dict, Optional, Any
+from collections import deque
 import numpy as np
 
 try:
@@ -27,6 +28,9 @@ class PassthroughManager:
         self.mutex = threading.Lock()
         self.active_sessions: Dict[str, PassthroughSession] = {}
         self.channel_id_to_index: Dict[str, int] = {}
+        self.audio_queues: Dict[str, deque] = {}
+        self.write_threads: Dict[str, threading.Thread] = {}
+        self.write_threads_running: Dict[str, bool] = {}
     
     def set_channel_mapping(self, channel_ids: list):
         with self.mutex:
@@ -113,9 +117,58 @@ class PassthroughManager:
             
             return True
     
+    def _write_worker(self, source_channel_id: str):
+        max_queue_size = 5
+        while self.write_threads_running.get(source_channel_id, False):
+            try:
+                session = None
+                with self.mutex:
+                    if source_channel_id not in self.active_sessions:
+                        break
+                    session = self.active_sessions[source_channel_id]
+                
+                if not session or not session.output_stream or not session.pa:
+                    time.sleep(0.01)
+                    continue
+                
+                queue = self.audio_queues.get(source_channel_id)
+                if not queue:
+                    time.sleep(0.01)
+                    continue
+                
+                if len(queue) > max_queue_size:
+                    while len(queue) > max_queue_size:
+                        try:
+                            queue.popleft()
+                        except IndexError:
+                            break
+                
+                if queue:
+                    try:
+                        pcm_bytes = queue.popleft()
+                        if not session.output_stream.is_active():
+                            try:
+                                session.output_stream.start_stream()
+                            except Exception:
+                                continue
+                        
+                        try:
+                            session.output_stream.write(pcm_bytes, exception_on_underflow=False)
+                        except Exception:
+                            pass
+                    except IndexError:
+                        pass
+                
+                time.sleep(0.001)
+            except Exception:
+                time.sleep(0.01)
+        
+        with self.mutex:
+            if source_channel_id in self.write_threads_running:
+                del self.write_threads_running[source_channel_id]
+    
     def route_audio(self, source_channel_id: str, audio_samples: np.ndarray) -> bool:
         try:
-            session = None
             with self.mutex:
                 if source_channel_id not in self.active_sessions:
                     return False
@@ -126,46 +179,49 @@ class PassthroughManager:
                 if current_time_ms >= session.end_time_ms:
                     self._stop_session(source_channel_id)
                     return False
-            
-            if not session or not session.output_stream or not session.pa:
-                return False
+                
+                if source_channel_id not in self.audio_queues:
+                    self.audio_queues[source_channel_id] = deque(maxlen=10)
+                
+                if source_channel_id not in self.write_threads_running:
+                    self.write_threads_running[source_channel_id] = True
+                    thread = threading.Thread(
+                        target=self._write_worker,
+                        args=(source_channel_id,),
+                        daemon=True
+                    )
+                    self.write_threads[source_channel_id] = thread
+                    thread.start()
             
             try:
                 pcm = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
                 pcm_bytes = pcm.tobytes()
                 
-                if not session.output_stream.is_active():
-                    try:
-                        session.output_stream.start_stream()
-                    except Exception as e:
-                        print(f"[PASSTHROUGH] WARNING: Failed to start stream: {e}")
-                        return False
-                
-                try:
-                    bytes_per_sample = 2
-                    frames_per_buffer = 1024
-                    bytes_per_chunk = frames_per_buffer * bytes_per_sample
-                    pcm_len = len(pcm_bytes)
-                    
-                    written = 0
-                    while written < pcm_len:
-                        chunk_size = min(bytes_per_chunk, pcm_len - written)
-                        chunk = pcm_bytes[written:written + chunk_size]
-                        try:
-                            session.output_stream.write(chunk, exception_on_underflow=False)
-                            written += chunk_size
-                        except Exception:
-                            return False
+                queue = self.audio_queues.get(source_channel_id)
+                if queue:
+                    queue.append(pcm_bytes)
                     return True
-                except Exception:
-                    return False
             except Exception:
-                return False
+                pass
             
+            return False
         except Exception:
             return False
     
     def _stop_session(self, source_channel_id: str):
+        if source_channel_id in self.write_threads_running:
+            self.write_threads_running[source_channel_id] = False
+        
+        if source_channel_id in self.write_threads:
+            thread = self.write_threads[source_channel_id]
+            if thread.is_alive():
+                thread.join(timeout=0.1)
+            del self.write_threads[source_channel_id]
+        
+        if source_channel_id in self.audio_queues:
+            self.audio_queues[source_channel_id].clear()
+            del self.audio_queues[source_channel_id]
+        
         if source_channel_id in self.active_sessions:
             session = self.active_sessions[source_channel_id]
             if session.output_stream and session.pa:
