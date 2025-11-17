@@ -169,6 +169,8 @@ class ChannelToneDetector:
                         self.tone_a_hit_streak[tone_id] = self.tone_a_hit_streak.get(tone_id, 0) + 1
                         self.tone_a_miss_streak[tone_id] = 0
                         self.tone_a_last_seen[tone_id] = current_time_ms
+                        if self.tone_a_tracking.get(tone_id, False):
+                            self.tone_a_miss_streak[tone_id] = 0
                         
                         matching_freq = next(
                             (f for f in peak_freqs 
@@ -181,6 +183,7 @@ class ChannelToneDetector:
                             if not self.tone_a_tracking.get(tone_id, False):
                                 self.tone_a_tracking[tone_id] = True
                                 self.tone_a_tracking_start[tone_id] = current_time_ms
+                                self.tone_a_miss_streak[tone_id] = 0
                                 print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                       f"Tone A detected! Starting duration tracking for "
                                       f"{tone_def['tone_a']:.1f} Hz ±{tone_def['tone_a_range']} Hz "
@@ -194,18 +197,22 @@ class ChannelToneDetector:
                         self.tone_a_miss_streak[tone_id] = self.tone_a_miss_streak.get(tone_id, 0) + 1
                         last_seen = self.tone_a_last_seen.get(tone_id, 0)
                         time_since_last_seen = current_time_ms - last_seen
+                        is_tracking = self.tone_a_tracking.get(tone_id, False)
                         if (time_since_last_seen > GRACE_MS and 
                             self.tone_a_miss_streak[tone_id] >= MISS_REQUIRED):
                             old_hit_streak = self.tone_a_hit_streak.get(tone_id, 0)
                             self.tone_a_hit_streak[tone_id] = 0
-                            if old_hit_streak > 0:
+                            if old_hit_streak > 0 and not is_tracking:
                                 print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                       f"Tone A hit streak reset (miss streak reached {MISS_REQUIRED})")
-                            if self.tone_a_tracking.get(tone_id, False):
-                                self.tone_a_tracking[tone_id] = False
-                                self.tone_a_tracking_start[tone_id] = 0
-                                print(f"[TONE DETECTION] Channel {self.channel_id}: "
-                                      f"Tone A tracking reset - frequency lost")
+                            if is_tracking:
+                                tracking_duration = current_time_ms - self.tone_a_tracking_start.get(tone_id, 0)
+                                if tracking_duration < tone_def["tone_a_length_ms"]:
+                                    self.tone_a_tracking[tone_id] = False
+                                    self.tone_a_tracking_start[tone_id] = 0
+                                    print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                          f"Tone A tracking reset - frequency lost "
+                                          f"(after {tracking_duration} ms, needed {tone_def['tone_a_length_ms']} ms)")
                     
                     if (self.tone_a_tracking.get(tone_id, False) and 
                         self.tone_a_tracking_start[tone_id] > 0):
@@ -235,6 +242,8 @@ class ChannelToneDetector:
                         self.tone_b_hit_streak[tone_id] = self.tone_b_hit_streak.get(tone_id, 0) + 1
                         self.tone_b_miss_streak[tone_id] = 0
                         self.tone_b_last_seen[tone_id] = current_time_ms
+                        if self.tone_b_tracking.get(tone_id, False):
+                            self.tone_b_miss_streak[tone_id] = 0
                         
                         matching_freq = next(
                             (f for f in peak_freqs 
@@ -247,6 +256,7 @@ class ChannelToneDetector:
                             if not self.tone_b_tracking.get(tone_id, False):
                                 self.tone_b_tracking[tone_id] = True
                                 self.tone_b_tracking_start[tone_id] = current_time_ms
+                                self.tone_b_miss_streak[tone_id] = 0
                                 print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                       f"Tone B detected! Starting duration tracking for "
                                       f"{tone_def['tone_b']:.1f} Hz ±{tone_def['tone_b_range']} Hz "
@@ -260,18 +270,22 @@ class ChannelToneDetector:
                         self.tone_b_miss_streak[tone_id] = self.tone_b_miss_streak.get(tone_id, 0) + 1
                         last_seen = self.tone_b_last_seen.get(tone_id, 0)
                         time_since_last_seen = current_time_ms - last_seen
+                        is_tracking = self.tone_b_tracking.get(tone_id, False)
                         if (time_since_last_seen > GRACE_MS and 
                             self.tone_b_miss_streak[tone_id] >= MISS_REQUIRED):
                             old_hit_streak = self.tone_b_hit_streak.get(tone_id, 0)
                             self.tone_b_hit_streak[tone_id] = 0
-                            if old_hit_streak > 0:
+                            if old_hit_streak > 0 and not is_tracking:
                                 print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                       f"Tone B hit streak reset (miss streak reached {MISS_REQUIRED})")
-                            if self.tone_b_tracking.get(tone_id, False):
-                                self.tone_b_tracking[tone_id] = False
-                                self.tone_b_tracking_start[tone_id] = 0
-                                print(f"[TONE DETECTION] Channel {self.channel_id}: "
-                                      f"Tone B tracking reset - frequency lost")
+                            if is_tracking:
+                                tracking_duration = current_time_ms - self.tone_b_tracking_start.get(tone_id, 0)
+                                if tracking_duration < tone_def["tone_b_length_ms"]:
+                                    self.tone_b_tracking[tone_id] = False
+                                    self.tone_b_tracking_start[tone_id] = 0
+                                    print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                          f"Tone B tracking reset - frequency lost "
+                                          f"(after {tracking_duration} ms, needed {tone_def['tone_b_length_ms']} ms)")
                     
                     if (self.tone_b_tracking.get(tone_id, False) and 
                         self.tone_b_tracking_start[tone_id] > 0):
