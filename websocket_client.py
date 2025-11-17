@@ -44,11 +44,9 @@ async def connect_to_server_async(url: str) -> bool:
 
     try:
         print(f"[WEBSOCKET] Connecting to: {url}")
-        # Use same subprotocol as C client ("audio-protocol")
         try:
             global_ws_client = await websockets.connect(url, subprotocols=["audio-protocol"])
         except TypeError:
-            # Fallback for very old websockets versions without subprotocols kw
             print("[WEBSOCKET] WARNING: websockets library does not support 'subprotocols' argument, trying without.")
             global_ws_client = await websockets.connect(url)
         ws_connected = True
@@ -217,7 +215,6 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
         status = "PTT PRESSED" if active else "PTT RELEASED"
         print(f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})")
         
-        # Start/stop audio transmission (like C code)
         try:
             from udp_player import global_udp_player
             channel_index = None
@@ -229,13 +226,11 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
             
             if channel_index is not None:
                 if active:
-                    # Start audio transmission for this channel
                     if global_udp_player.start_transmission_for_channel(channel_index):
                         print(f"[WEBSOCKET] Started audio transmission for channel {channel_id} (index {channel_index})")
                     else:
                         print(f"[WEBSOCKET] WARNING: Failed to start audio transmission for channel {channel_id}")
                 else:
-                    # Stop audio transmission for this channel
                     global_udp_player.stop_transmission_for_channel(channel_index)
                     print(f"[WEBSOCKET] Stopped audio transmission for channel {channel_id} (index {channel_index})")
         except Exception as e:
@@ -270,7 +265,6 @@ def send_connect_message(channel_id: str) -> bool:
 
 def register_channels(channel_ids: List[str]) -> None:
     for cid in channel_ids:
-        # New protocol: connect acts as registration
         if send_connect_message(cid):
             if cid not in registered_channels:
                 registered_channels.append(cid)
@@ -282,7 +276,6 @@ def register_channels(channel_ids: List[str]) -> None:
                     pass
 
 def request_register_channel(channel_id: str) -> None:
-    # Queue channel for registration if not connected yet, else send immediately
     if channel_id in registered_channels:
         return
     if not ws_connected or global_ws_client is None:
@@ -341,7 +334,6 @@ def handle_users_connected(message: Dict[str, Any]) -> None:
                         print(f"    ... and {len(connected_users) - 5} more")
                 print("=" * 60)
             else:
-
                 print(f"[WEBSOCKET] Users Connected Event #{users_connected_count}: {total_users} total user(s) online")
                 if connected_users and len(connected_users) > 0:
                     print(f"  Active connections: {len(connected_users)}")
@@ -474,13 +466,10 @@ async def websocket_handler_async():
 
                 message_count += 1
 
-                # Normalize message to text (server may send bytes or str)
                 message_text = (message.decode('utf-8', errors='replace')
                                 if isinstance(message, (bytes, bytearray)) else message)
                 message_text_stripped = message_text.strip()
 
-                # If the raw message mentions users_connected, always log it,
-                # even if JSON parsing fails or the structure is unexpected.
                 if "users_connected" in message_text:
                     print("=" * 60)
                     print("[WEBSOCKET] Raw users_connected message detected:")
@@ -488,20 +477,16 @@ async def websocket_handler_async():
                     print("=" * 60)
 
                 try:
-                    # Treat empty/whitespace-only messages as keepalives; skip parsing
                     if not message_text_stripped:
                         continue
                     data = json.loads(message_text_stripped)
                 except json.JSONDecodeError as e:
-                    # Already logged above if it contained users_connected; otherwise log basic error.
                     if "users_connected" not in message_text:
                         print(f"[WEBSOCKET] JSON decode error: {e}")
-                        # Only print content if non-empty; avoid spamming blank lines
                         if message_text_stripped:
                             print(f"[WEBSOCKET] Message content: {message_text_stripped[:200]}")
                     continue
 
-                # Handle UDP configuration messages first
                 udp_config = parse_udp_config(message_text_stripped)
                 if udp_config:
                     if udp_config_callback:
@@ -509,15 +494,12 @@ async def websocket_handler_async():
                             udp_config_callback(udp_config)
                         except Exception as e:
                             print(f"[WEBSOCKET] ERROR: Exception in UDP config callback: {e}")
-                    # Start external UDP player (separate thread) aligned with C data plane
                     try:
                         from udp_player import global_udp_player
                         udp_port = int(udp_config.get('udp_port', 0) or 0)
                         udp_host = str(udp_config.get('udp_host', ''))
                         aes_key = str(udp_config.get('aes_key', '') or '')
                         
-                        # Ensure channel IDs are set before starting UDP player
-                        # (they should already be set in start_websocket, but double-check)
                         if pending_register_ids:
                             global_udp_player.set_channel_ids(pending_register_ids)
                             print(f"[WEBSOCKET] Set channel IDs for UDP player: {pending_register_ids}")
@@ -525,25 +507,20 @@ async def websocket_handler_async():
                         if udp_port > 0:
                             print(f"[WEBSOCKET] Starting UDP player: port={udp_port}, host={udp_host}, aes_key={'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}")
                             if global_udp_player.start(udp_port=udp_port, host_hint=udp_host, aes_key_b64=aes_key):
-                                # UDP is now ready - start audio transmission for channels with active GPIO
-                                # This matches C code: start_transmission_for_channel when UDP is ready
                                 print("[WEBSOCKET] UDP ready - starting audio transmission for active channels")
                                 if _AUDIO_OK:
-                                    # Use registered_channels or global_udp_player._channel_ids to get all channels
                                     channel_ids_to_check = registered_channels if registered_channels else global_udp_player._channel_ids
                                     gpio_keys = list(GPIO_PINS.keys())
                                     for idx, channel_id in enumerate(channel_ids_to_check):
                                         if idx < len(gpio_keys):
                                             gpio_num = gpio_keys[idx]
                                             gpio_state = gpio_states.get(gpio_num, -1)
-                                            if gpio_state == 0:  # GPIO is ACTIVE
+                                            if gpio_state == 0:
                                                 print(f"[WEBSOCKET] Starting audio transmission for channel {channel_id} (GPIO {gpio_num} is ACTIVE, UDP now ready)")
-                                                # Start transmission (this opens input stream and starts sending audio)
                                                 if global_udp_player.start_transmission_for_channel(idx):
                                                     print(f"[WEBSOCKET] ✓ Audio transmission started for channel {channel_id}")
                                                 else:
                                                     print(f"[WEBSOCKET] ✗ Failed to start audio transmission for channel {channel_id}")
-                                                # Also resend transmit_started event to server
                                                 send_transmit_event(channel_id, True)
                         else:
                             print(f"[WEBSOCKET] WARNING: Invalid UDP port: {udp_port}")
@@ -553,7 +530,6 @@ async def websocket_handler_async():
                         traceback.print_exc()
                     continue
 
-                # Handle users_connected messages regardless of structure
                 if "users_connected" in str(data):
                     handle_users_connected(data)
                     continue
@@ -565,12 +541,10 @@ async def websocket_handler_async():
                     except Exception as e:
                         print(f"[WEBSOCKET] ERROR: Exception in message handler for {message_type}: {e}")
                 else:
-
                     if message_count % 50 == 0:
                         print(f"[WEBSOCKET] Unhandled message type: {message_type}")
 
             except asyncio.TimeoutError:
-
                 continue
             except websockets.exceptions.ConnectionClosed:
                 print("[WEBSOCKET] Connection closed by server")
@@ -614,8 +588,6 @@ def global_websocket_thread(url: str):
         print("[WEBSOCKET] WebSocket connection established - sending connect messages for all configured channels")
         
         try:
-            # Connection established; send connect messages for ALL configured channels immediately (like C client)
-            # The C client sends connect messages for all channels[i].active (configured channels) right after connection
             if pending_register_ids:
                 print(f"[WEBSOCKET] Sending connect messages for {len(pending_register_ids)} configured channel(s)")
                 for ch_id in list(pending_register_ids):
@@ -625,7 +597,6 @@ def global_websocket_thread(url: str):
                         print(f"[WEBSOCKET] ✓ Connect message sent for channel {ch_id}")
                     else:
                         print(f"[WEBSOCKET] ✗ Failed to send connect message for channel {ch_id}")
-                # Clear pending list after sending
                 pending_register_ids.clear()
                 print(f"[WEBSOCKET] All connect messages sent. Registered channels: {registered_channels}")
             else:
@@ -642,7 +613,6 @@ def global_websocket_thread(url: str):
         import traceback
         traceback.print_exc()
     finally:
-
         try:
             if global_ws_client is not None:
                 ws_event_loop.run_until_complete(disconnect_async())
@@ -656,10 +626,8 @@ def global_websocket_thread(url: str):
 
 def start_websocket(url: str = "wss://audio.redenes.org/ws/", channel_ids: Optional[List[str]] = None) -> threading.Thread:
     if isinstance(channel_ids, list) and channel_ids:
-        # Stash for registration right after connect
         pending_register_ids.clear()
         pending_register_ids.extend([str(c).strip() for c in channel_ids if str(c).strip()])
-        # Provide channel IDs to UDP player for id->index mapping
         try:
             from udp_player import global_udp_player
             global_udp_player.set_channel_ids(channel_ids)

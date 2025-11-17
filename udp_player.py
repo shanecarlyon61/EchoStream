@@ -474,9 +474,9 @@ class UDPPlayer:
                                             self._sock.sendto(msg.encode('utf-8'), self._server_addr)  # nosec
                                             
                                             send_count += 1
-                                            if send_count <= 5 or send_count % 500 == 0:
-                                                print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
-                                                      f"({len(msg)} bytes) to {self._server_addr}")
+                                            # if send_count <= 5 or send_count % 500 == 0:
+                                                # print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
+                                                #       f"({len(msg)} bytes) to {self._server_addr}")
                                     except Exception as e:
                                         if send_count <= 10:
                                             print(f"[AUDIO TX ERROR] Channel {channel_id}: Encryption/send failed: {e}")
