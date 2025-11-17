@@ -31,16 +31,22 @@ except Exception:
     HAS_OPUS = False
 
 try:
-    from config import load_config, get_frequency_filters, get_tone_detect_config
+    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions
     from frequency_filter import apply_audio_frequency_filters
+    from tone_detection import init_channel_detector, process_audio_for_channel
     HAS_FREQ_FILTER = True
+    HAS_TONE_DETECT = True
 except Exception as e:
-    print(f"[UDP] WARNING: Frequency filtering not available: {e}")
+    print(f"[UDP] WARNING: Frequency filtering/tone detection not available: {e}")
     HAS_FREQ_FILTER = False
+    HAS_TONE_DETECT = False
     load_config = None
     get_frequency_filters = None
     get_tone_detect_config = None
+    get_tone_definitions = None
     apply_audio_frequency_filters = None
+    init_channel_detector = None
+    process_audio_for_channel = None
 
 
 class UDPPlayer:
@@ -123,6 +129,13 @@ class UDPPlayer:
                         print(f"[UDP] Loaded {len(filters)} frequency filter(s) for tone detection on channel {channel_id}")
                     else:
                         self._frequency_filters[channel_id] = []
+                    
+                    if HAS_TONE_DETECT and get_tone_definitions and init_channel_detector:
+                        tone_defs = get_tone_definitions(self._config_cache, channel_id)
+                        if tone_defs:
+                            init_channel_detector(channel_id, tone_defs)
+                            print(f"[UDP] Initialized tone detection for channel {channel_id} "
+                                  f"with {len(tone_defs)} tone definition(s)")
                 else:
                     self._frequency_filters[channel_id] = []
         except Exception as e:
@@ -497,7 +510,36 @@ class UDPPlayer:
                     bundle[buffer_pos_key] += 1
                     
                     if bundle[buffer_pos_key] >= 1920:
-                        pcm = (np.clip(input_buffer[:1920], -1.0, 1.0) * 32767.0).astype(np.int16)
+                        audio_chunk = input_buffer[:1920].copy()
+                        
+                        if (HAS_TONE_DETECT and
+                            self._tone_detect_enabled.get(channel_id, False) and
+                            process_audio_for_channel and
+                            apply_audio_frequency_filters):
+                            try:
+                                filters = self._frequency_filters.get(channel_id, [])
+                                if filters:
+                                    filtered_audio = apply_audio_frequency_filters(
+                                        audio_chunk, filters, sample_rate=48000
+                                    )
+                                else:
+                                    filtered_audio = audio_chunk
+                                
+                                detected_tone = process_audio_for_channel(
+                                    channel_id, filtered_audio
+                                )
+                                if detected_tone:
+                                    print(f"[TONE DETECTION] Sequence detected on "
+                                          f"channel {channel_id}: "
+                                          f"{detected_tone.get('tone_id', 'unknown')}")
+                            except Exception as e:
+                                if send_count <= 10:
+                                    print(f"[AUDIO TX] WARNING: Tone detection "
+                                          f"failed: {e}")
+                        
+                        pcm = (np.clip(audio_chunk, -1.0, 1.0) * 32767.0).astype(
+                            np.int16
+                        )
                         pcm_bytes = pcm.tobytes()
                         
                         # Encode with Opus (like C code: opus_encode(encoder, pcm, 1920, opus_data, sizeof(opus_data)))
