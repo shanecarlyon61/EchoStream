@@ -44,10 +44,7 @@ class PassthroughManager:
         }
         
         if target_channel_id in channel_name_to_index:
-            idx = channel_name_to_index[target_channel_id]
-            channel_list = list(self.channel_id_to_index.keys())
-            if idx < len(channel_list):
-                return idx
+            return channel_name_to_index[target_channel_id]
         
         return None
     
@@ -75,6 +72,8 @@ class PassthroughManager:
             target_index = self._get_target_channel_index(target_channel_id)
             if target_index is None:
                 print(f"[PASSTHROUGH] ERROR: Cannot find target channel index for '{target_channel_id}'")
+                print(f"[PASSTHROUGH] Available channel mappings: {list(self.channel_id_to_index.keys())}")
+                print(f"[PASSTHROUGH] Supported channel names: channel_one, channel_two, channel_three, channel_four")
                 return False
             
             session = PassthroughSession(source_channel_id, target_channel_id, duration_ms)
@@ -89,10 +88,12 @@ class PassthroughManager:
                             stream.start_stream()
                             session.pa = pa
                             session.output_stream = stream
-                            print(f"[PASSTHROUGH] Opened output stream for target channel {target_channel_id} (index {target_index})")
+                            print(f"[PASSTHROUGH] Opened output stream for target channel {target_channel_id} (index {target_index}, device {device_index})")
                         except Exception as e:
                             print(f"[PASSTHROUGH] WARNING: Failed to start output stream: {e}")
                             close_stream(pa, stream)
+                else:
+                    print(f"[PASSTHROUGH] WARNING: No audio device available for channel index {target_index} (target: {target_channel_id})")
             
             self.active_sessions[source_channel_id] = session
             print(f"[PASSTHROUGH] Started: {source_channel_id} -> {target_channel_id}, duration={duration_ms} ms")

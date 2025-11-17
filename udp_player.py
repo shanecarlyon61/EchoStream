@@ -31,7 +31,7 @@ except Exception:
     HAS_OPUS = False
 
 try:
-    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config
+    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config, get_channel_ids
     from frequency_filter import apply_audio_frequency_filters
     from tone_detection import init_channel_detector, process_audio_for_channel
     from passthrough import global_passthrough_manager
@@ -49,6 +49,7 @@ except Exception as e:
     get_tone_definitions = None
     get_new_tone_config = None
     get_passthrough_config = None
+    get_channel_ids = None
     apply_audio_frequency_filters = None
     init_channel_detector = None
     process_audio_for_channel = None
@@ -113,7 +114,15 @@ class UDPPlayer:
         # Preserve order to map index
         self._channel_ids = [str(c).strip() for c in channel_ids if str(c).strip()]
         if HAS_PASSTHROUGH and global_passthrough_manager:
-            global_passthrough_manager.set_channel_mapping(self._channel_ids)
+            all_channel_ids = []
+            if load_config and get_channel_ids:
+                if self._config_cache is None:
+                    self._config_cache = load_config()
+                all_channel_ids = get_channel_ids(self._config_cache)
+            if all_channel_ids:
+                global_passthrough_manager.set_channel_mapping(all_channel_ids)
+            else:
+                global_passthrough_manager.set_channel_mapping(self._channel_ids)
         self._load_frequency_filters()
     
     def _load_frequency_filters(self) -> None:

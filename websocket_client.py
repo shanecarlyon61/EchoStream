@@ -201,7 +201,7 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
             event_type: {
                 "affiliation_id": "12345",
                 "user_name": "EchoStream",
-                "agency_name": "TestAgency",
+                "agency_name": "Python",
                 "channel_id": channel_id,
                 "time": int(_time.time())
             }
@@ -247,7 +247,7 @@ def send_connect_message(channel_id: str) -> bool:
             "connect": {
                 "affiliation_id": "12345",
                 "user_name": "EchoStream",
-                "agency_name": "TestAgency",
+                "agency_name": "Python",
                 "channel_id": channel_id,
                 "time": int(_time.time())
             }
