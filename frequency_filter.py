@@ -4,7 +4,6 @@ Removes unwanted frequencies from audio before encoding.
 """
 import numpy as np
 from typing import List, Dict, Any
-import math
 
 SAMPLE_RATE = 48000
 FFT_SIZE = 1024
@@ -56,15 +55,11 @@ def apply_audio_frequency_filters(
     output_samples = np.zeros_like(audio_samples)
     
     processed_samples = 0
+    window = np.hanning(FFT_SIZE)
+    
     while processed_samples + FFT_SIZE <= len(audio_samples):
-        fft_input = np.zeros(FFT_SIZE, dtype=np.float64)
-        
-        for i in range(FFT_SIZE):
-            fft_input[i] = float(audio_samples[processed_samples + i])
-        
-        for i in range(FFT_SIZE):
-            window = 0.5 * (1.0 - math.cos(2.0 * math.pi * i / (FFT_SIZE - 1)))
-            fft_input[i] *= window
+        chunk = audio_samples[processed_samples:processed_samples + FFT_SIZE]
+        fft_input = chunk.astype(np.float64) * window
         
         fft_output = np.fft.rfft(fft_input)
         
@@ -78,20 +73,19 @@ def apply_audio_frequency_filters(
             target_bin_int = int(target_bin)
             
             if filter_type == "below":
-                for i in range(min(target_bin_int, len(fft_output))):
-                    fft_output[i] = 0.0 + 0.0j
+                if target_bin_int > 0:
+                    fft_output[:min(target_bin_int, len(fft_output))] = 0.0
             elif filter_type == "above":
-                for i in range(target_bin_int, len(fft_output)):
-                    fft_output[i] = 0.0 + 0.0j
+                if target_bin_int < len(fft_output):
+                    fft_output[target_bin_int:] = 0.0
             elif filter_type == "center":
-                for i in range(len(fft_output)):
-                    if abs(i - target_bin_int) > range_bins:
-                        fft_output[i] = 0.0 + 0.0j
+                mask = np.abs(np.arange(len(fft_output)) - target_bin_int) > range_bins
+                fft_output[mask] = 0.0
         
         filtered_samples = np.fft.irfft(fft_output, n=FFT_SIZE)
-        
-        for i in range(FFT_SIZE):
-            output_samples[processed_samples + i] = np.float32(filtered_samples[i] / FFT_SIZE)
+        output_samples[processed_samples:processed_samples + FFT_SIZE] = (
+            filtered_samples.astype(np.float32) / FFT_SIZE
+        )
         
         processed_samples += FFT_SIZE
     

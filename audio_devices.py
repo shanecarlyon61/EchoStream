@@ -80,7 +80,7 @@ def select_output_device_for_channel(channel_index: int) -> Optional[int]:
 def open_output_stream(device_index: int,
                        sample_rate: int = 48000,
                        num_channels: int = 1,
-                       frames_per_buffer: int = 960):
+                       frames_per_buffer: int = 1024):
     pa = _get_pa()
     if pa is None:
         return None, None

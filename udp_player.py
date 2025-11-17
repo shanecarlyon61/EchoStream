@@ -257,10 +257,25 @@ class UDPPlayer:
                         # Ensure stream is started
                         if not stream.is_active():  # type: ignore[attr-defined]
                             stream.start_stream()  # type: ignore[attr-defined]
-                        # Write PCM data (already in int16 format from decoder)
-                        stream.write(pcm)  # type: ignore[attr-defined]
+                        # Write PCM data in chunks to avoid buffer issues
+                        # 1920 samples = 3840 bytes (int16), write in 1024-sample chunks
+                        pcm_len = len(pcm)
+                        bytes_per_sample = 2
+                        samples_per_chunk = 1024
+                        bytes_per_chunk = samples_per_chunk * bytes_per_sample
+                        written = 0
+                        while written < pcm_len:
+                            chunk_size = min(bytes_per_chunk, pcm_len - written)
+                            chunk = pcm[written:written + chunk_size]
+                            try:
+                                stream.write(chunk)  # type: ignore[attr-defined]
+                                written += chunk_size
+                            except Exception as write_err:
+                                if self._receive_count <= 10:
+                                    print(f"[UDP] ERROR: stream.write() failed: {write_err}")
+                                break
                         if self._receive_count <= 10:
-                            print(f"[UDP] Wrote {len(pcm)} bytes PCM to channel {target_index} (channel_id: {ch_id})")
+                            print(f"[UDP] Wrote {written} bytes PCM to channel {target_index} (channel_id: {ch_id})")
                     except Exception as e:
                         print(f"[UDP] WARNING: write failed for channel index {target_index}: {e}")
                         import traceback
