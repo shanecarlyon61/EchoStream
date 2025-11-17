@@ -578,15 +578,18 @@ class UDPPlayer:
                                     try:
                                         global_passthrough_manager.route_audio(channel_id, audio_chunk)
                                     except Exception as e:
-                                        if send_count % 100 == 0:
+                                        if send_count <= 10 or send_count % 500 == 0:
                                             print(f"[AUDIO TX] WARNING: Passthrough route_audio failed: {e}")
                                         import traceback
                                         traceback.print_exc()
                             except Exception as e:
-                                if send_count % 100 == 0:
+                                if send_count <= 10 or send_count % 500 == 0:
                                     print(f"[AUDIO TX] WARNING: Passthrough check failed: {e}")
                                 import traceback
                                 traceback.print_exc()
+                        
+                        if send_count == 0 and passthrough_active:
+                            print(f"[AUDIO TX] Passthrough active for channel {channel_id}, continuing transmission...")
                         
                         pcm = (np.clip(audio_chunk, -1.0, 1.0) * 32767.0).astype(
                             np.int16
@@ -627,7 +630,7 @@ class UDPPlayer:
                                             if send_count <= 5 or send_count % 500 == 0:
                                                 print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
                                                       f"({len(msg)} bytes) to {self._server_addr}, passthrough={'active' if passthrough_active else 'inactive'}")
-                                            elif passthrough_active and send_count % 100 == 0:
+                                            elif passthrough_active and (send_count % 100 == 0):
                                                 print(f"[AUDIO TX] Channel {channel_id}: Broadcasting to UDP server (packet #{send_count}, passthrough active)")
                                         else:
                                             if send_count <= 10:

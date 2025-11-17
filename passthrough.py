@@ -116,40 +116,42 @@ class PassthroughManager:
     def route_audio(self, source_channel_id: str, audio_samples: np.ndarray) -> bool:
         try:
             with self.mutex:
-                if not self.is_active(source_channel_id):
+                if source_channel_id not in self.active_sessions:
                     return False
                 
                 session = self.active_sessions[source_channel_id]
-            
-            if session.output_stream and session.pa:
-                try:
-                    pcm = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
-                    pcm_bytes = pcm.tobytes()
-                    
-                    if not session.output_stream.is_active():
-                        try:
-                            session.output_stream.start_stream()
-                        except Exception as e:
-                            print(f"[PASSTHROUGH] WARNING: Failed to start stream: {e}")
-                            return False
-                    
-                    try:
-                        session.output_stream.write(pcm_bytes, exception_on_underflow=False)
-                        return True
-                    except Exception as e:
-                        print(f"[PASSTHROUGH] ERROR: Failed to write audio: {e}")
-                        return False
-                except Exception as e:
-                    print(f"[PASSTHROUGH] ERROR: Exception in route_audio: {e}")
-                    import traceback
-                    traceback.print_exc()
+                current_time_ms = int(time.time() * 1000)
+                
+                if current_time_ms >= session.end_time_ms:
+                    self._stop_session(source_channel_id)
                     return False
             
-            return False
+            if not session.output_stream or not session.pa:
+                return False
+            
+            try:
+                pcm = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+                pcm_bytes = pcm.tobytes()
+                
+                if not session.output_stream.is_active():
+                    try:
+                        session.output_stream.start_stream()
+                    except Exception as e:
+                        print(f"[PASSTHROUGH] WARNING: Failed to start stream: {e}")
+                        return False
+                
+                try:
+                    session.output_stream.write(pcm_bytes, exception_on_underflow=False)
+                    return True
+                except Exception as e:
+                    print(f"[PASSTHROUGH] ERROR: Failed to write audio: {e}")
+                    return False
+            except Exception as e:
+                print(f"[PASSTHROUGH] ERROR: Exception in route_audio processing: {e}")
+                return False
+            
         except Exception as e:
             print(f"[PASSTHROUGH] ERROR: Critical error in route_audio: {e}")
-            import traceback
-            traceback.print_exc()
             return False
     
     def _stop_session(self, source_channel_id: str):
