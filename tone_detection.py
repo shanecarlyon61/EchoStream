@@ -300,28 +300,34 @@ class ChannelToneDetector:
                                                          tone_def["tone_b_range"])),
                                 None
                             )
-                            print("\n" + "=" * 80)
-                            print(" " * 20 + "*** TONE SEQUENCE DETECTED! ***")
-                            print("=" * 80)
-                            print(f"  Channel ID:     {self.channel_id}")
-                            print(f"  Tone ID:        {tone_def['tone_id']}")
-                            print("  ")
-                            print("  Tone A Details:")
-                            print(f"    Frequency:    {tone_def['tone_a']:.1f} Hz "
-                                  f"±{tone_def['tone_a_range']} Hz")
-                            print(f"    Duration:     {tone_def['tone_a_length_ms']} ms (required)")
-                            print("  ")
-                            print("  Tone B Details:")
-                            print(f"    Detected:     {matching_freq_b:.1f} Hz")
-                            print(f"    Target:       {tone_def['tone_b']:.1f} Hz "
-                                  f"±{tone_def['tone_b_range']} Hz")
-                            print(f"    Duration:     {duration} ms "
-                                  f"(required: {tone_def['tone_b_length_ms']} ms)")
-                            print("  ")
-                            print(f"  Record Length:  {tone_def['record_length_ms']} ms")
+                            alert_type_line = ""
                             if tone_def.get("detection_tone_alert"):
-                                print(f"  Alert Type:     {tone_def['detection_tone_alert']}")
-                            print("=" * 80 + "\n")
+                                alert_type_line = f"  Alert Type:     {tone_def['detection_tone_alert']}\n"
+                            
+                            confirmation_log = (
+                                "\n" + "=" * 80 + "\n" +
+                                " " * 20 + "*** TONE SEQUENCE DETECTED! ***\n" +
+                                "=" * 80 + "\n" +
+                                f"  Channel ID:     {self.channel_id}\n" +
+                                f"  Tone ID:        {tone_def['tone_id']}\n" +
+                                "  \n" +
+                                "  Tone A Details:\n" +
+                                f"    Frequency:    {tone_def['tone_a']:.1f} Hz "
+                                f"±{tone_def['tone_a_range']} Hz\n" +
+                                f"    Duration:     {tone_def['tone_a_length_ms']} ms (required)\n" +
+                                "  \n" +
+                                "  Tone B Details:\n" +
+                                f"    Detected:     {matching_freq_b:.1f} Hz\n" +
+                                f"    Target:       {tone_def['tone_b']:.1f} Hz "
+                                f"±{tone_def['tone_b_range']} Hz\n" +
+                                f"    Duration:     {duration} ms "
+                                f"(required: {tone_def['tone_b_length_ms']} ms)\n" +
+                                "  \n" +
+                                f"  Record Length:  {tone_def['record_length_ms']} ms\n" +
+                                alert_type_line +
+                                "=" * 80 + "\n"
+                            )
+                            print(confirmation_log, flush=True)
                             
                             self.tone_a_confirmed[tone_id] = False
                             self.tone_b_confirmed[tone_id] = False
@@ -331,6 +337,10 @@ class ChannelToneDetector:
                             self.tone_b_tracking_start[tone_id] = 0
                             self.tone_a_hit_streak[tone_id] = 0
                             self.tone_b_hit_streak[tone_id] = 0
+                            self.tone_a_miss_streak[tone_id] = 0
+                            self.tone_b_miss_streak[tone_id] = 0
+                            self.tone_a_last_seen[tone_id] = 0
+                            self.tone_b_last_seen[tone_id] = 0
                             
                             return tone_def
         
