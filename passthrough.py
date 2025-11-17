@@ -119,29 +119,37 @@ class PassthroughManager:
     
     def _write_worker(self, source_channel_id: str):
         max_queue_size = 5
+        write_count = 0
+        print(f"[PASSTHROUGH] Write worker started for channel {source_channel_id}")
+        
         while self.write_threads_running.get(source_channel_id, False):
             try:
                 session = None
+                queue = None
                 with self.mutex:
                     if source_channel_id not in self.active_sessions:
                         break
                     session = self.active_sessions[source_channel_id]
+                    queue = self.audio_queues.get(source_channel_id)
                 
                 if not session or not session.output_stream or not session.pa:
                     time.sleep(0.01)
                     continue
                 
-                queue = self.audio_queues.get(source_channel_id)
                 if not queue:
                     time.sleep(0.01)
                     continue
                 
                 if len(queue) > max_queue_size:
+                    dropped = 0
                     while len(queue) > max_queue_size:
                         try:
                             queue.popleft()
+                            dropped += 1
                         except IndexError:
                             break
+                    if dropped > 0 and write_count % 100 == 0:
+                        print(f"[PASSTHROUGH] Dropped {dropped} audio chunks from queue for {source_channel_id}")
                 
                 if queue:
                     try:
@@ -149,26 +157,37 @@ class PassthroughManager:
                         if not session.output_stream.is_active():
                             try:
                                 session.output_stream.start_stream()
-                            except Exception:
+                                print(f"[PASSTHROUGH] Started output stream for {source_channel_id}")
+                            except Exception as e:
+                                if write_count % 100 == 0:
+                                    print(f"[PASSTHROUGH] ERROR: Failed to start stream: {e}")
                                 continue
                         
                         try:
                             session.output_stream.write(pcm_bytes, exception_on_underflow=False)
-                        except Exception:
-                            pass
+                            write_count += 1
+                            if write_count <= 5 or write_count % 500 == 0:
+                                print(f"[PASSTHROUGH] Wrote audio chunk #{write_count} for {source_channel_id} ({len(pcm_bytes)} bytes)")
+                        except Exception as e:
+                            if write_count % 100 == 0:
+                                print(f"[PASSTHROUGH] ERROR: Failed to write audio: {e}")
                     except IndexError:
                         pass
                 
                 time.sleep(0.001)
-            except Exception:
+            except Exception as e:
+                if write_count % 100 == 0:
+                    print(f"[PASSTHROUGH] ERROR in write worker: {e}")
                 time.sleep(0.01)
         
+        print(f"[PASSTHROUGH] Write worker stopped for channel {source_channel_id}")
         with self.mutex:
             if source_channel_id in self.write_threads_running:
                 del self.write_threads_running[source_channel_id]
     
     def route_audio(self, source_channel_id: str, audio_samples: np.ndarray) -> bool:
         try:
+            queue = None
             with self.mutex:
                 if source_channel_id not in self.active_sessions:
                     return False
@@ -183,6 +202,8 @@ class PassthroughManager:
                 if source_channel_id not in self.audio_queues:
                     self.audio_queues[source_channel_id] = deque(maxlen=10)
                 
+                queue = self.audio_queues[source_channel_id]
+                
                 if source_channel_id not in self.write_threads_running:
                     self.write_threads_running[source_channel_id] = True
                     thread = threading.Thread(
@@ -192,20 +213,22 @@ class PassthroughManager:
                     )
                     self.write_threads[source_channel_id] = thread
                     thread.start()
+                    print(f"[PASSTHROUGH] Started write thread for channel {source_channel_id}")
             
-            try:
-                pcm = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
-                pcm_bytes = pcm.tobytes()
-                
-                queue = self.audio_queues.get(source_channel_id)
-                if queue:
+            if queue:
+                try:
+                    pcm = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+                    pcm_bytes = pcm.tobytes()
                     queue.append(pcm_bytes)
                     return True
-            except Exception:
-                pass
+                except Exception as e:
+                    print(f"[PASSTHROUGH] ERROR: Failed to queue audio: {e}")
+            else:
+                print(f"[PASSTHROUGH] WARNING: Queue not found for {source_channel_id}")
             
             return False
-        except Exception:
+        except Exception as e:
+            print(f"[PASSTHROUGH] ERROR: Exception in route_audio: {e}")
             return False
     
     def _stop_session(self, source_channel_id: str):
