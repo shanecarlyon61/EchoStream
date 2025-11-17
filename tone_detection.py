@@ -199,17 +199,19 @@ class ChannelToneDetector:
                             tracking_duration = current_time_ms - self.tone_a_tracking_start.get(tone_id, 0)
                             last_seen = self.tone_a_last_seen.get(tone_id, 0)
                             time_since_last_seen = current_time_ms - last_seen
-                            if time_since_last_seen > GRACE_MS * 2:
+                            required_duration = tone_def["tone_a_length_ms"]
+                            max_gap_allowed = max(GRACE_MS * 4, required_duration // 2)
+                            if time_since_last_seen > max_gap_allowed and tracking_duration < required_duration:
                                 self.tone_a_miss_streak[tone_id] = self.tone_a_miss_streak.get(tone_id, 0) + 1
-                                if (self.tone_a_miss_streak[tone_id] >= MISS_REQUIRED and
-                                    tracking_duration < tone_def["tone_a_length_ms"]):
+                                if self.tone_a_miss_streak[tone_id] >= MISS_REQUIRED:
                                     self.tone_a_tracking[tone_id] = False
                                     self.tone_a_tracking_start[tone_id] = 0
                                     self.tone_a_hit_streak[tone_id] = 0
                                     print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                           f"Tone A tracking reset - frequency lost "
-                                          f"(after {tracking_duration} ms, needed {tone_def['tone_a_length_ms']} ms, "
-                                          f"last seen {time_since_last_seen} ms ago)")
+                                          f"(after {tracking_duration} ms, needed {required_duration} ms, "
+                                          f"last seen {time_since_last_seen} ms ago, "
+                                          f"max gap: {max_gap_allowed} ms)")
                         else:
                             self.tone_a_miss_streak[tone_id] = self.tone_a_miss_streak.get(tone_id, 0) + 1
                             last_seen = self.tone_a_last_seen.get(tone_id, 0)
@@ -280,17 +282,19 @@ class ChannelToneDetector:
                             tracking_duration = current_time_ms - self.tone_b_tracking_start.get(tone_id, 0)
                             last_seen = self.tone_b_last_seen.get(tone_id, 0)
                             time_since_last_seen = current_time_ms - last_seen
-                            if time_since_last_seen > GRACE_MS * 2:
+                            required_duration = tone_def["tone_b_length_ms"]
+                            max_gap_allowed = max(GRACE_MS * 4, required_duration // 2)
+                            if time_since_last_seen > max_gap_allowed and tracking_duration < required_duration:
                                 self.tone_b_miss_streak[tone_id] = self.tone_b_miss_streak.get(tone_id, 0) + 1
-                                if (self.tone_b_miss_streak[tone_id] >= MISS_REQUIRED and
-                                    tracking_duration < tone_def["tone_b_length_ms"]):
+                                if self.tone_b_miss_streak[tone_id] >= MISS_REQUIRED:
                                     self.tone_b_tracking[tone_id] = False
                                     self.tone_b_tracking_start[tone_id] = 0
                                     self.tone_b_hit_streak[tone_id] = 0
                                     print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                           f"Tone B tracking reset - frequency lost "
-                                          f"(after {tracking_duration} ms, needed {tone_def['tone_b_length_ms']} ms, "
-                                          f"last seen {time_since_last_seen} ms ago)")
+                                          f"(after {tracking_duration} ms, needed {required_duration} ms, "
+                                          f"last seen {time_since_last_seen} ms ago, "
+                                          f"max gap: {max_gap_allowed} ms)")
                         else:
                             self.tone_b_miss_streak[tone_id] = self.tone_b_miss_streak.get(tone_id, 0) + 1
                             last_seen = self.tone_b_last_seen.get(tone_id, 0)
