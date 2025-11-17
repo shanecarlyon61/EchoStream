@@ -486,18 +486,7 @@ class UDPPlayer:
                     bundle[buffer_pos_key] += 1
                     
                     if bundle[buffer_pos_key] >= 1920:
-                        filtered_buffer = input_buffer[:1920].copy()
-                        if HAS_FREQ_FILTER and apply_audio_frequency_filters:
-                            filters = self._frequency_filters.get(channel_id, [])
-                            if filters:
-                                try:
-                                    filtered_buffer = apply_audio_frequency_filters(
-                                        filtered_buffer, filters, sample_rate=48000
-                                    )
-                                except Exception as e:
-                                    if send_count <= 10:
-                                        print(f"[AUDIO TX] WARNING: Frequency filter failed: {e}")
-                        pcm = (np.clip(filtered_buffer, -1.0, 1.0) * 32767.0).astype(np.int16)
+                        pcm = (np.clip(input_buffer[:1920], -1.0, 1.0) * 32767.0).astype(np.int16)
                         pcm_bytes = pcm.tobytes()
                         
                         # Encode with Opus (like C code: opus_encode(encoder, pcm, 1920, opus_data, sizeof(opus_data)))
