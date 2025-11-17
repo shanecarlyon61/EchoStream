@@ -4,12 +4,10 @@ import websockets
 import json
 from typing import Optional, Dict, Any, Callable, List
 
-# Local interruption flag (replaces dependency on removed echostream module)
 global_interrupted = threading.Event()
 
-# Audio resources (when using internal writer)
-_audio_streams_by_channel: Dict[int, Dict[str, object]] = {}  # channel_index -> {'pa': pa, 'stream': stream}
-_channel_output_device_index: Dict[int, int] = {}  # preferred device per channel index (set by main)
+_audio_streams_by_channel: Dict[int, Dict[str, object]] = {}
+_channel_output_device_index: Dict[int, int] = {}
 
 try:
     from audio_devices import select_output_device_for_channel, open_output_stream, close_stream
