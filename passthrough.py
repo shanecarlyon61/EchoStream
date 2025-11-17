@@ -82,7 +82,7 @@ class PassthroughManager:
             if HAS_AUDIO_DEVICES:
                 device_index = select_output_device_for_channel(target_index)
                 if device_index is not None:
-                    pa, stream = open_output_stream(device_index)
+                    pa, stream = open_output_stream(device_index, frames_per_buffer=1024)
                     if pa and stream:
                         try:
                             stream.start_stream()
@@ -115,6 +115,7 @@ class PassthroughManager:
     
     def route_audio(self, source_channel_id: str, audio_samples: np.ndarray) -> bool:
         try:
+            session = None
             with self.mutex:
                 if source_channel_id not in self.active_sessions:
                     return False
@@ -126,7 +127,7 @@ class PassthroughManager:
                     self._stop_session(source_channel_id)
                     return False
             
-            if not session.output_stream or not session.pa:
+            if not session or not session.output_stream or not session.pa:
                 return False
             
             try:
@@ -141,17 +142,27 @@ class PassthroughManager:
                         return False
                 
                 try:
-                    session.output_stream.write(pcm_bytes, exception_on_underflow=False)
+                    bytes_per_sample = 2
+                    frames_per_buffer = 1024
+                    bytes_per_chunk = frames_per_buffer * bytes_per_sample
+                    pcm_len = len(pcm_bytes)
+                    
+                    written = 0
+                    while written < pcm_len:
+                        chunk_size = min(bytes_per_chunk, pcm_len - written)
+                        chunk = pcm_bytes[written:written + chunk_size]
+                        try:
+                            session.output_stream.write(chunk, exception_on_underflow=False)
+                            written += chunk_size
+                        except Exception:
+                            return False
                     return True
-                except Exception as e:
-                    print(f"[PASSTHROUGH] ERROR: Failed to write audio: {e}")
+                except Exception:
                     return False
-            except Exception as e:
-                print(f"[PASSTHROUGH] ERROR: Exception in route_audio processing: {e}")
+            except Exception:
                 return False
             
-        except Exception as e:
-            print(f"[PASSTHROUGH] ERROR: Critical error in route_audio: {e}")
+        except Exception:
             return False
     
     def _stop_session(self, source_channel_id: str):
