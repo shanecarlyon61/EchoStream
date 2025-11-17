@@ -31,7 +31,7 @@ except Exception:
     HAS_OPUS = False
 
 try:
-    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions
+    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config
     from frequency_filter import apply_audio_frequency_filters
     from tone_detection import init_channel_detector, process_audio_for_channel
     HAS_FREQ_FILTER = True
@@ -44,6 +44,7 @@ except Exception as e:
     get_frequency_filters = None
     get_tone_detect_config = None
     get_tone_definitions = None
+    get_new_tone_config = None
     apply_audio_frequency_filters = None
     init_channel_detector = None
     process_audio_for_channel = None
@@ -132,8 +133,11 @@ class UDPPlayer:
                     
                     if HAS_TONE_DETECT and get_tone_definitions and init_channel_detector:
                         tone_defs = get_tone_definitions(self._config_cache, channel_id)
-                        if tone_defs:
-                            init_channel_detector(channel_id, tone_defs)
+                        new_tone_cfg = None
+                        if get_new_tone_config:
+                            new_tone_cfg = get_new_tone_config(self._config_cache, channel_id)
+                        if tone_defs or (new_tone_cfg and new_tone_cfg.get("detect_new_tones", False)):
+                            init_channel_detector(channel_id, tone_defs, new_tone_cfg)
                             print(f"[UDP] Initialized tone detection for channel {channel_id} "
                                   f"with {len(tone_defs)} tone definition(s)")
                         else:

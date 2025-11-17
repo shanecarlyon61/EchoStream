@@ -5,11 +5,13 @@ from typing import Dict, List, Optional, Any
 from numpy.fft import rfft
 
 try:
-    from mqtt_client import publish_known_tone_detection
+    from mqtt_client import publish_known_tone_detection, publish_new_tone_pair
     MQTT_AVAILABLE = True
 except ImportError:
     MQTT_AVAILABLE = False
     def publish_known_tone_detection(*args, **kwargs):
+        return False
+    def publish_new_tone_pair(*args, **kwargs):
         return False
 
 
@@ -41,12 +43,18 @@ def is_frequency_in_range(detected_freq: float, target_freq: float, range_hz: in
 
 
 class ChannelToneDetector:
-    def __init__(self, channel_id: str, tone_definitions: List[Dict[str, Any]]):
+    def __init__(self, channel_id: str, tone_definitions: List[Dict[str, Any]], new_tone_config: Optional[Dict[str, Any]] = None):
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
         self.audio_buffer: List[float] = []
         self.max_buffer_samples = int(SAMPLE_RATE * 10)
         self.mutex = threading.Lock()
+        
+        if new_tone_config is None:
+            new_tone_config = {"detect_new_tones": False, "new_tone_length_ms": 1000, "new_tone_range_hz": 3}
+        self.detect_new_tones = new_tone_config.get("detect_new_tones", False)
+        self.new_tone_length_ms = new_tone_config.get("new_tone_length_ms", 1000)
+        self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
         
         self.tone_a_tracking: Dict[str, bool] = {}
         self.tone_b_tracking: Dict[str, bool] = {}
@@ -60,6 +68,18 @@ class ChannelToneDetector:
         self.tone_b_miss_streak: Dict[str, int] = {}
         self.tone_a_last_seen: Dict[str, int] = {}
         self.tone_b_last_seen: Dict[str, int] = {}
+        
+        self.new_tone_tracking: List[Dict[str, Any]] = []
+        for i in range(10):
+            self.new_tone_tracking.append({
+                "is_tracking": False,
+                "frequency": 0.0,
+                "tracking_start": 0,
+                "hit_streak": 0,
+                "miss_streak": 0,
+                "last_seen": 0
+            })
+        self.detected_frequencies: List[float] = []
         
         for tone_def in tone_definitions:
             tone_id = tone_def["tone_id"]
@@ -364,20 +384,136 @@ class ChannelToneDetector:
                                 if old_hit_streak > 0:
                                     print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                           f"Tone B hit streak reset (miss streak reached {MISS_REQUIRED})")
+            
+            if self.detect_new_tones:
+                self._detect_new_tones(peak_freqs, current_time_ms)
         
         return None
+    
+    def _detect_new_tones(self, peak_freqs: List[float], current_time_ms: int):
+        if not self.detect_new_tones:
+            return
+        
+        confirmed_indices = []
+        confirmed_freqs = []
+        
+        for i, freq in enumerate(peak_freqs):
+            is_known_tone = False
+            
+            for tone_def in self.tone_definitions:
+                if (is_frequency_in_range(freq, tone_def["tone_a"], tone_def["tone_a_range"]) or
+                    is_frequency_in_range(freq, tone_def["tone_b"], tone_def["tone_b_range"])):
+                    is_known_tone = True
+                    break
+            
+            if is_known_tone:
+                continue
+            
+            already_confirmed = False
+            for detected_freq in self.detected_frequencies:
+                if abs(detected_freq - freq) < self.new_tone_range_hz:
+                    already_confirmed = True
+                    break
+            
+            if already_confirmed:
+                continue
+            
+            tracking_idx = -1
+            for t in range(10):
+                if self.new_tone_tracking[t]["is_tracking"]:
+                    if abs(self.new_tone_tracking[t]["frequency"] - freq) < self.new_tone_range_hz:
+                        tracking_idx = t
+                        break
+                elif tracking_idx == -1:
+                    tracking_idx = t
+            
+            if tracking_idx >= 0:
+                if not self.new_tone_tracking[tracking_idx]["is_tracking"]:
+                    self.new_tone_tracking[tracking_idx]["frequency"] = freq
+                    self.new_tone_tracking[tracking_idx]["is_tracking"] = True
+                    self.new_tone_tracking[tracking_idx]["tracking_start"] = current_time_ms
+                    self.new_tone_tracking[tracking_idx]["hit_streak"] = 1
+                    self.new_tone_tracking[tracking_idx]["miss_streak"] = 0
+                    self.new_tone_tracking[tracking_idx]["last_seen"] = current_time_ms
+                else:
+                    self.new_tone_tracking[tracking_idx]["hit_streak"] += 1
+                    self.new_tone_tracking[tracking_idx]["miss_streak"] = 0
+                    self.new_tone_tracking[tracking_idx]["last_seen"] = current_time_ms
+                    
+                    avg_freq = (self.new_tone_tracking[tracking_idx]["frequency"] + freq) / 2.0
+                    if abs(avg_freq - self.new_tone_tracking[tracking_idx]["frequency"]) < self.new_tone_range_hz:
+                        self.new_tone_tracking[tracking_idx]["frequency"] = avg_freq
+                    
+                    elapsed = current_time_ms - self.new_tone_tracking[tracking_idx]["tracking_start"]
+                    if elapsed >= self.new_tone_length_ms:
+                        if len(confirmed_indices) < 10:
+                            confirmed_indices.append(tracking_idx)
+                            confirmed_freqs.append(self.new_tone_tracking[tracking_idx]["frequency"])
+            
+            if i == len(peak_freqs) - 1:
+                if len(confirmed_indices) >= 2:
+                    idx_a = confirmed_indices[0]
+                    idx_b = confirmed_indices[1]
+                    tone_a = confirmed_freqs[0]
+                    tone_b = confirmed_freqs[1]
+                    
+                    if self.new_tone_tracking[idx_b]["tracking_start"] < self.new_tone_tracking[idx_a]["tracking_start"]:
+                        idx_a, idx_b = idx_b, idx_a
+                        tone_a, tone_b = tone_b, tone_a
+                    
+                    print(f"[NEW TONE PAIR] Channel {self.channel_id}: "
+                          f"A={tone_a:.1f} Hz, B={tone_b:.1f} Hz "
+                          f"(each ≥ {self.new_tone_length_ms} ms, ±{self.new_tone_range_hz} Hz stable)")
+                    
+                    if len(self.detected_frequencies) < 100:
+                        self.detected_frequencies.append(tone_a)
+                    if len(self.detected_frequencies) < 100:
+                        self.detected_frequencies.append(tone_b)
+                    
+                    if MQTT_AVAILABLE:
+                        publish_new_tone_pair(tone_a, tone_b)
+                    
+                    self.new_tone_tracking[idx_a]["is_tracking"] = False
+                    self.new_tone_tracking[idx_a]["tracking_start"] = 0
+                    self.new_tone_tracking[idx_a]["hit_streak"] = 0
+                    self.new_tone_tracking[idx_a]["miss_streak"] = 0
+                    self.new_tone_tracking[idx_b]["is_tracking"] = False
+                    self.new_tone_tracking[idx_b]["tracking_start"] = 0
+                    self.new_tone_tracking[idx_b]["hit_streak"] = 0
+                    self.new_tone_tracking[idx_b]["miss_streak"] = 0
+        
+        for t in range(10):
+            if self.new_tone_tracking[t]["is_tracking"]:
+                found = False
+                for peak_freq in peak_freqs:
+                    if abs(self.new_tone_tracking[t]["frequency"] - peak_freq) < self.new_tone_range_hz:
+                        found = True
+                        break
+                
+                if not found:
+                    self.new_tone_tracking[t]["miss_streak"] += 1
+                    time_since_last_seen = current_time_ms - self.new_tone_tracking[t]["last_seen"]
+                    if time_since_last_seen > GRACE_MS and self.new_tone_tracking[t]["miss_streak"] >= MISS_REQUIRED:
+                        self.new_tone_tracking[t]["is_tracking"] = False
+                        self.new_tone_tracking[t]["tracking_start"] = 0
+                        self.new_tone_tracking[t]["hit_streak"] = 0
+                        self.new_tone_tracking[t]["miss_streak"] = 0
 
 
 _channel_detectors: Dict[str, ChannelToneDetector] = {}
 _detectors_mutex = threading.Lock()
 
 
-def init_channel_detector(channel_id: str, tone_definitions: List[Dict[str, Any]]) -> None:
+def init_channel_detector(channel_id: str, tone_definitions: List[Dict[str, Any]], new_tone_config: Optional[Dict[str, Any]] = None) -> None:
     with _detectors_mutex:
-        if tone_definitions:
-            _channel_detectors[channel_id] = ChannelToneDetector(channel_id, tone_definitions)
+        if tone_definitions or (new_tone_config and new_tone_config.get("detect_new_tones", False)):
+            _channel_detectors[channel_id] = ChannelToneDetector(channel_id, tone_definitions, new_tone_config)
             print(f"[TONE DETECTION] Initialized detector for channel {channel_id} "
                   f"with {len(tone_definitions)} tone definition(s)")
+            if new_tone_config and new_tone_config.get("detect_new_tones", False):
+                print(f"[TONE DETECTION] New tone detection enabled: "
+                      f"length={new_tone_config.get('new_tone_length_ms', 1000)} ms, "
+                      f"range=±{new_tone_config.get('new_tone_range_hz', 3)} Hz")
             for i, tone_def in enumerate(tone_definitions, 1):
                 print(f"[TONE DETECTION]   Definition {i}:")
                 print(f"    Tone ID: {tone_def.get('tone_id', 'N/A')}")

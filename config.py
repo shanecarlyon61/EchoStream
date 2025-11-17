@@ -152,3 +152,36 @@ def get_tone_definitions(cfg: Dict[str, Any], channel_id: str) -> List[Dict[str,
         print(f"[CONFIG] WARNING: No valid tone definitions found for channel {channel_id}")
     return tone_defs
 
+
+def get_new_tone_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
+    result = {
+        "detect_new_tones": False,
+        "new_tone_length_ms": 1000,
+        "new_tone_range_hz": 3
+    }
+    try:
+        sw_cfg_list = (
+            cfg.get("shadow", {})
+               .get("state", {})
+               .get("desired", {})
+               .get("software_configuration", [])
+        )
+        if not sw_cfg_list:
+            return result
+        item = sw_cfg_list[0]
+        for key in ("channel_one", "channel_two", "channel_three", "channel_four"):
+            ch = item.get(key, {})
+            ch_id_from_cfg = ch.get("channel_id", "")
+            if ch_id_from_cfg != channel_id:
+                continue
+            tone_detect_config = ch.get("tone_detect_configuration", {})
+            alert_details = tone_detect_config.get("alert_details", {})
+            if alert_details:
+                result["detect_new_tones"] = bool(alert_details.get("detect_new_tones", False))
+                result["new_tone_length_ms"] = int(alert_details.get("new_tone_length", 1000))
+                result["new_tone_range_hz"] = int(alert_details.get("new_tone_range", 3))
+            break
+    except Exception as e:
+        print(f"[CONFIG] ERROR: Failed to get new tone config for {channel_id}: {e}")
+    return result
+
