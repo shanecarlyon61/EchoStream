@@ -113,8 +113,11 @@ def get_tone_definitions(cfg: Dict[str, Any], channel_id: str) -> List[Dict[str,
             if ch_id_from_cfg != channel_id:
                 continue
             tone_detect_config = ch.get("tone_detect_configuration", {})
-            tone_definitions = tone_detect_config.get("tone_definitions", [])
-            for tone_obj in tone_definitions:
+            alert_tones = tone_detect_config.get("alert_tones", [])
+            if not alert_tones:
+                print(f"[CONFIG] DEBUG: No 'alert_tones' found for channel {channel_id}. "
+                      f"Keys in tone_detect_config: {list(tone_detect_config.keys())}")
+            for tone_obj in alert_tones:
                 tone_data = {
                     "tone_id": str(tone_obj.get("tone_id", "")),
                     "tone_a": float(tone_obj.get("tone_a", 0.0)),
@@ -130,8 +133,22 @@ def get_tone_definitions(cfg: Dict[str, Any], channel_id: str) -> List[Dict[str,
                     tone_data["tone_a"] > 0 and 
                     tone_data["tone_b"] > 0):
                     tone_defs.append(tone_data)
+                    print(f"[CONFIG] Loaded tone definition: ID={tone_data['tone_id']}, "
+                          f"A={tone_data['tone_a']:.1f} Hz±{tone_data['tone_a_range']} "
+                          f"({tone_data['tone_a_length_ms']}ms), "
+                          f"B={tone_data['tone_b']:.1f} Hz±{tone_data['tone_b_range']} "
+                          f"({tone_data['tone_b_length_ms']}ms), "
+                          f"rec={tone_data['record_length_ms']}ms")
+                else:
+                    print(f"[CONFIG] WARNING: Skipped invalid tone definition: "
+                          f"tone_id='{tone_data['tone_id']}', "
+                          f"tone_a={tone_data['tone_a']}, tone_b={tone_data['tone_b']}")
             break
     except Exception as e:
         print(f"[CONFIG] ERROR: Failed to get tone definitions for {channel_id}: {e}")
+        import traceback
+        traceback.print_exc()
+    if not tone_defs:
+        print(f"[CONFIG] WARNING: No valid tone definitions found for channel {channel_id}")
     return tone_defs
 
