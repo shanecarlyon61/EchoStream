@@ -31,6 +31,11 @@ def get_device_id_from_config() -> Optional[str]:
     try:
         with open(config_path, 'r') as f:
             cfg = json.load(f)
+        
+        unique_id = cfg.get("unique_id")
+        if unique_id:
+            return unique_id
+        
         unique_id = (
             cfg.get("shadow", {})
             .get("state", {})
@@ -210,13 +215,19 @@ def publish_known_tone_detection(
     try:
         message_id = generate_uuid()
         timestamp = int(time.time())
-        device_id = global_mqtt.device_id
+        
+        device_id = get_device_id_from_config()
+        if not device_id:
+            device_id = global_mqtt.device_id
+        if not device_id:
+            print("[MQTT] ERROR: Cannot determine device_id (unique_id) for topic")
+            return False
         
         payload = {
             "message_id": message_id,
             "timestamp": timestamp,
             "device_id": device_id,
-            "event_type": "known_tone_detected",
+            "event_type": "defined_tones_detected",
             "tone_details": {
                 "tone_a": tone_a_hz,
                 "tone_b": tone_b_hz
