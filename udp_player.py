@@ -575,10 +575,18 @@ class UDPPlayer:
                                 global_passthrough_manager.cleanup_expired_sessions()
                                 if global_passthrough_manager.is_active(channel_id):
                                     passthrough_active = True
-                                    global_passthrough_manager.route_audio(channel_id, audio_chunk)
+                                    try:
+                                        global_passthrough_manager.route_audio(channel_id, audio_chunk)
+                                    except Exception as e:
+                                        if send_count % 100 == 0:
+                                            print(f"[AUDIO TX] WARNING: Passthrough route_audio failed: {e}")
+                                        import traceback
+                                        traceback.print_exc()
                             except Exception as e:
                                 if send_count % 100 == 0:
-                                    print(f"[AUDIO TX] WARNING: Passthrough failed: {e}")
+                                    print(f"[AUDIO TX] WARNING: Passthrough check failed: {e}")
+                                import traceback
+                                traceback.print_exc()
                         
                         pcm = (np.clip(audio_chunk, -1.0, 1.0) * 32767.0).astype(
                             np.int16

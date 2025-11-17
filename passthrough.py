@@ -114,11 +114,12 @@ class PassthroughManager:
             return True
     
     def route_audio(self, source_channel_id: str, audio_samples: np.ndarray) -> bool:
-        with self.mutex:
-            if not self.is_active(source_channel_id):
-                return False
-            
-            session = self.active_sessions[source_channel_id]
+        try:
+            with self.mutex:
+                if not self.is_active(source_channel_id):
+                    return False
+                
+                session = self.active_sessions[source_channel_id]
             
             if session.output_stream and session.pa:
                 try:
@@ -126,14 +127,29 @@ class PassthroughManager:
                     pcm_bytes = pcm.tobytes()
                     
                     if not session.output_stream.is_active():
-                        session.output_stream.start_stream()
+                        try:
+                            session.output_stream.start_stream()
+                        except Exception as e:
+                            print(f"[PASSTHROUGH] WARNING: Failed to start stream: {e}")
+                            return False
                     
-                    session.output_stream.write(pcm_bytes)
-                    return True
+                    try:
+                        session.output_stream.write(pcm_bytes, exception_on_underflow=False)
+                        return True
+                    except Exception as e:
+                        print(f"[PASSTHROUGH] ERROR: Failed to write audio: {e}")
+                        return False
                 except Exception as e:
-                    print(f"[PASSTHROUGH] ERROR: Failed to write audio: {e}")
+                    print(f"[PASSTHROUGH] ERROR: Exception in route_audio: {e}")
+                    import traceback
+                    traceback.print_exc()
                     return False
             
+            return False
+        except Exception as e:
+            print(f"[PASSTHROUGH] ERROR: Critical error in route_audio: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _stop_session(self, source_channel_id: str):

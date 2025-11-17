@@ -165,8 +165,13 @@ def send_message(message: str) -> bool:
                     return loop.run_until_complete(send_message_async(message))
                 finally:
                     loop.close()
+    except asyncio.TimeoutError:
+        print("[WEBSOCKET] WARNING: send_message timeout (non-critical)")
+        return False
     except Exception as e:
         print(f"[WEBSOCKET] ERROR: Exception in send_message: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def register_channel(channel_id: str) -> bool:
@@ -211,14 +216,26 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
         print(f"[WEBSOCKET] ERROR: Failed to build transmit payload: {e}")
         return False
 
-    if send_message(message):
-        status = "PTT PRESSED" if active else "PTT RELEASED"
-        print(f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})")
-        
-        try:
-            from udp_player import global_udp_player
-            channel_index = None
-            if global_udp_player._channel_ids:
+    try:
+        if ws_event_loop is not None and ws_event_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(send_message_async(message), ws_event_loop)
+            try:
+                result = future.result(timeout=1.0)
+                if result:
+                    status = "PTT PRESSED" if active else "PTT RELEASED"
+                    print(f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})")
+                return result
+            except asyncio.TimeoutError:
+                print("[WEBSOCKET] WARNING: Transmit event timeout (non-critical)")
+                return False
+        else:
+            if send_message(message):
+                status = "PTT PRESSED" if active else "PTT RELEASED"
+                print(f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})")
+                return True
+    except Exception as e:
+        print(f"[WEBSOCKET] WARNING: Failed to send transmit event: {e}")
+    return False
                 try:
                     channel_index = global_udp_player._channel_ids.index(channel_id)
                 except ValueError:
