@@ -72,8 +72,19 @@ def _on_connect(client, userdata, flags, rc):
 def _on_disconnect(client, userdata, rc):
     global global_mqtt
     global_mqtt.connected = False
-    if rc != 0:
-        print(f"[MQTT] Unexpected disconnection (rc={rc}), will attempt to reconnect")
+    if rc == 0:
+        print(f"[MQTT] Disconnected normally (rc={rc})")
+    else:
+        rc_messages = {
+            1: "Protocol version",
+            2: "Client identifier rejected",
+            3: "Server unavailable",
+            4: "Bad username or password",
+            5: "Not authorized",
+            7: "Network error"
+        }
+        rc_msg = rc_messages.get(rc, f"Unknown error")
+        print(f"[MQTT] Unexpected disconnection (rc={rc}: {rc_msg}), will attempt to reconnect")
 
 def _reconnect_mqtt(within_mutex: bool = False) -> bool:
     global global_mqtt
@@ -168,33 +179,75 @@ def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None
             global_mqtt.client_cert_path = cert_path
             global_mqtt.client_key_path = key_path
             
-            global_mqtt.client = mqtt.Client(client_id=device_id)
+            global_mqtt.client = mqtt.Client(
+                client_id=device_id,
+                clean_session=True,
+                protocol=mqtt.MQTTv311
+            )
             global_mqtt.client.on_connect = _on_connect
             global_mqtt.client.on_disconnect = _on_disconnect
             
             if ca_path and cert_path and key_path:
-                global_mqtt.client.tls_set(
-                    ca_certs=ca_path,
-                    certfile=cert_path,
-                    keyfile=key_path
-                )
-                print(f"[MQTT] TLS configured with certificates")
+                try:
+                    global_mqtt.client.tls_set(
+                        ca_certs=ca_path,
+                        certfile=cert_path,
+                        keyfile=key_path,
+                        tls_version=2
+                    )
+                    print(f"[MQTT] TLS configured with certificates")
+                except Exception as e:
+                    print(f"[MQTT] ERROR: TLS configuration failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    global_mqtt.initialized = True
+                    return False
             else:
                 print(f"[MQTT] WARNING: Certificates not found, attempting connection without TLS")
             
+            global_mqtt.client.reconnect_delay_set(min_delay=1, max_delay=120)
+            
             print(f"[MQTT] Connecting to {broker_host}:{broker_port}...")
-            global_mqtt.client.connect(broker_host, broker_port, 60)
-            global_mqtt.client.loop_start()
+            try:
+                result = global_mqtt.client.connect(broker_host, broker_port, keepalive=60)
+                if result != mqtt.MQTT_ERR_SUCCESS:
+                    print(f"[MQTT] ERROR: connect() returned error code: {result}")
+                    global_mqtt.initialized = True
+                    return False
+            except Exception as e:
+                print(f"[MQTT] ERROR: connect() failed: {e}")
+                import traceback
+                traceback.print_exc()
+                global_mqtt.initialized = True
+                return False
             
-            time.sleep(2)
+            try:
+                global_mqtt.client.loop_start()
+            except Exception as e:
+                print(f"[MQTT] ERROR: loop_start() failed: {e}")
+                global_mqtt.initialized = True
+                return False
             
+            for i in range(20):
+                time.sleep(0.25)
+                if global_mqtt.client.is_connected():
+                    global_mqtt.connected = True
+                    global_mqtt.initialized = True
+                    print(f"[MQTT] ✓ Connected to broker at {broker_host}:{broker_port}")
+                    time.sleep(0.5)
+                    if global_mqtt.client.is_connected():
+                        return True
+                    else:
+                        print(f"[MQTT] WARNING: Connection lost immediately after connect")
+                        break
+            
+            print(f"[MQTT] WARNING: Connection timeout after 5 seconds")
             if global_mqtt.client.is_connected():
                 global_mqtt.connected = True
                 global_mqtt.initialized = True
-                print(f"[MQTT] ✓ Connected to broker at {broker_host}:{broker_port}")
                 return True
             else:
-                print(f"[MQTT] WARNING: Connection timeout - broker may not be responding")
+                print(f"[MQTT] Connection not established, will retry on next publish")
                 global_mqtt.initialized = True
                 return False
         except Exception as e:
@@ -217,19 +270,18 @@ def mqtt_publish(topic: str, payload: str) -> bool:
                 needs_reinit = True
             else:
                 return False
-        
-            if global_mqtt.client and not global_mqtt.client.is_connected():
-                reconnect_result = _reconnect_mqtt(within_mutex=True)
-                if not reconnect_result:
-                    if not global_mqtt.initialized:
-                        needs_reinit = True
-                    else:
-                        return False
-                elif not global_mqtt.client or not global_mqtt.client.is_connected():
-                    if not global_mqtt.initialized:
-                        needs_reinit = True
-                    else:
-                        return False
+        elif global_mqtt.client and not global_mqtt.client.is_connected():
+            reconnect_result = _reconnect_mqtt(within_mutex=True)
+            if not reconnect_result:
+                if not global_mqtt.initialized:
+                    needs_reinit = True
+                else:
+                    return False
+            elif not global_mqtt.client or not global_mqtt.client.is_connected():
+                if not global_mqtt.initialized:
+                    needs_reinit = True
+                else:
+                    return False
         
         if needs_reinit:
             device_id = global_mqtt.device_id

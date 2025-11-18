@@ -147,11 +147,14 @@ class RecordingManager:
                 if queue:
                     try:
                         audio_samples = queue.popleft()
-                        int16_samples = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
-                        for sample in int16_samples:
-                            session.recording_file.write(struct.pack('<h', sample))
-                        session.samples_written += len(int16_samples)
-                    except IndexError:
+                        if session.recording_file and not session.recording_file.closed:
+                            int16_samples = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+                            for sample in int16_samples:
+                                session.recording_file.write(struct.pack('<h', sample))
+                            session.samples_written += len(int16_samples)
+                    except (IndexError, ValueError, OSError) as e:
+                        if "closed" not in str(e).lower():
+                            print(f"[RECORDING] Write error: {e}")
                         pass
                 
                 time.sleep(0.001)
@@ -205,44 +208,52 @@ class RecordingManager:
     
     def _stop_session(self, channel_id: str):
         session = None
+        filename = None
+        tone_type = None
+        tone_a_hz = None
+        tone_b_hz = None
+        
         with self.mutex:
             if channel_id not in self.active_sessions:
                 return
             session = self.active_sessions[channel_id]
+            del self.active_sessions[channel_id]
         
-        if session:
-            session.write_thread_running = False
-            
-            if session.write_thread and session.write_thread.is_alive():
-                session.write_thread.join(timeout=1.0)
-            
-            if session.recording_file:
-                try:
+        if not session:
+            return
+        
+        session.write_thread_running = False
+        
+        if session.write_thread and session.write_thread.is_alive():
+            session.write_thread.join(timeout=2.0)
+        
+        if session.recording_file:
+            try:
+                if not session.recording_file.closed:
                     data_bytes = session.samples_written * 2
                     session.recording_file.seek(0)
                     write_wav_header(session.recording_file, SAMPLE_RATE, BITS_PER_SAMPLE, CHANNELS, data_bytes)
+                    session.recording_file.flush()
                     session.recording_file.close()
                     duration_sec = (int(time.time() * 1000) - session.start_time_ms) / 1000.0
                     print(f"[RECORDING] Stopped recording: {session.filename}")
                     print(f"[RECORDING]   Duration: {duration_sec:.2f} seconds, Samples: {session.samples_written}, Size: {data_bytes} bytes")
-                except Exception as e:
-                    print(f"[RECORDING] ERROR: Failed to finalize WAV file: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            filename = session.filename
-            tone_type = session.tone_type
-            tone_a_hz = session.tone_a_hz
-            tone_b_hz = session.tone_b_hz
+                else:
+                    print(f"[RECORDING] WARNING: Recording file already closed: {session.filename}")
+            except Exception as e:
+                print(f"[RECORDING] ERROR: Failed to finalize WAV file: {e}")
+                import traceback
+                traceback.print_exc()
         
-        with self.mutex:
-            if channel_id in self.active_sessions:
-                del self.active_sessions[channel_id]
+        filename = session.filename
+        tone_type = session.tone_type
+        tone_a_hz = session.tone_a_hz
+        tone_b_hz = session.tone_b_hz
         
         if filename:
             if os.path.exists(filename):
                 file_size = os.path.getsize(filename)
-                print(f"[RECORDING] Recording completed, file size: {file_size} bytes")
+                print(f"[RECORDING] Recording completed, file size: {file_size} bytes ({file_size / 1024 / 1024:.2f} MB)")
                 print(f"[RECORDING] Starting S3 upload for: {filename}")
                 self._upload_to_s3(filename, tone_type, tone_a_hz, tone_b_hz, channel_id)
             else:
@@ -301,10 +312,10 @@ class RecordingManager:
         upload_thread_obj.start()
     
     def cleanup_expired_sessions(self):
+        expired = []
         with self.mutex:
             current_time_ms = int(time.time() * 1000)
-            expired = []
-            for ch_id, session in self.active_sessions.items():
+            for ch_id, session in list(self.active_sessions.items()):
                 if current_time_ms >= session.end_time_ms:
                     expired.append(ch_id)
                     remaining_ms = current_time_ms - session.end_time_ms
