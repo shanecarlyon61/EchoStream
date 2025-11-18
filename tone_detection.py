@@ -335,6 +335,17 @@ class ChannelToneDetector:
                                 except Exception as e:
                                     print(f"[PASSTHROUGH] ERROR: Failed to trigger passthrough: {e}")
                                 
+                                try:
+                                    from recording import global_recording_manager
+                                    record_length_ms = tone_def.get("record_length_ms", 0)
+                                    if record_length_ms > 0:
+                                        global_recording_manager.start_recording(
+                                            self.channel_id, "defined",
+                                            tone_def["tone_a"], tone_def["tone_b"], record_length_ms
+                                        )
+                                except Exception as e:
+                                    print(f"[RECORDING] ERROR: Failed to start recording: {e}")
+                                
                                 self.tone_a_confirmed[tone_id] = False
                                 self.tone_b_confirmed[tone_id] = False
                                 self.tone_a_tracking[tone_id] = False
@@ -489,6 +500,17 @@ class ChannelToneDetector:
                     
                     if MQTT_AVAILABLE:
                         publish_new_tone_pair(tone_a, tone_b)
+                    
+                    try:
+                        from recording import global_recording_manager
+                        if hasattr(self, 'new_tone_config') and self.new_tone_config:
+                            new_tone_length_ms = self.new_tone_config.get("new_tone_length_ms", 0)
+                            if new_tone_length_ms > 0:
+                                global_recording_manager.start_recording(
+                                    self.channel_id, "new", tone_a, tone_b, new_tone_length_ms
+                                )
+                    except Exception as e:
+                        print(f"[RECORDING] ERROR: Failed to start new tone recording: {e}")
                     
                     self.new_tone_tracking[idx_a]["is_tracking"] = False
                     self.new_tone_tracking[idx_a]["tracking_start"] = 0

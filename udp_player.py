@@ -35,9 +35,11 @@ try:
     from frequency_filter import apply_audio_frequency_filters
     from tone_detection import init_channel_detector, process_audio_for_channel
     from passthrough import global_passthrough_manager
+    from recording import global_recording_manager
     HAS_FREQ_FILTER = True
     HAS_TONE_DETECT = True
     HAS_PASSTHROUGH = True
+    HAS_RECORDING = True
 except Exception as e:
     print(f"[UDP] WARNING: Frequency filtering/tone detection not available: {e}")
     HAS_FREQ_FILTER = False
@@ -54,6 +56,8 @@ except Exception as e:
     init_channel_detector = None
     process_audio_for_channel = None
     global_passthrough_manager = None
+    global_recording_manager = None
+    HAS_RECORDING = False
 
 
 class UDPPlayer:
@@ -577,6 +581,17 @@ class UDPPlayer:
                                     passthrough_active = True
                                     try:
                                         global_passthrough_manager.route_audio(channel_id, audio_chunk)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        
+                        if HAS_RECORDING and global_recording_manager:
+                            try:
+                                global_recording_manager.cleanup_expired_sessions()
+                                if global_recording_manager.is_active(channel_id):
+                                    try:
+                                        global_recording_manager.route_audio(channel_id, audio_chunk)
                                     except Exception:
                                         pass
                             except Exception:
