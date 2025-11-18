@@ -60,6 +60,77 @@ def find_certificates():
     
     return ca_path, cert_path, key_path
 
+def _on_connect(client, userdata, flags, rc):
+    global global_mqtt
+    if rc == 0:
+        global_mqtt.connected = True
+        print(f"[MQTT] ✓ Connected to broker (rc={rc})")
+    else:
+        global_mqtt.connected = False
+        print(f"[MQTT] ERROR: Connection failed with rc={rc}")
+
+def _on_disconnect(client, userdata, rc):
+    global global_mqtt
+    global_mqtt.connected = False
+    if rc != 0:
+        print(f"[MQTT] Unexpected disconnection (rc={rc}), will attempt to reconnect")
+
+def _reconnect_mqtt(within_mutex: bool = False) -> bool:
+    global global_mqtt
+    
+    if not global_mqtt.client:
+        if not within_mutex:
+            with mqtt_mutex:
+                return _reconnect_mqtt(within_mutex=True)
+        return False
+    
+    try:
+        if global_mqtt.client.is_connected():
+            return True
+        
+        print("[MQTT] Attempting to reconnect...")
+        
+        try:
+            global_mqtt.client.reconnect()
+            time.sleep(1.0)
+            if global_mqtt.client.is_connected():
+                print("[MQTT] ✓ Reconnected successfully")
+                return True
+        except Exception as e:
+            print(f"[MQTT] reconnect() failed: {e}, re-initializing connection...")
+        
+        try:
+            global_mqtt.client.loop_stop()
+        except Exception:
+            pass
+        
+        try:
+            global_mqtt.client.disconnect()
+        except Exception:
+            pass
+        
+        global_mqtt.client = None
+        global_mqtt.connected = False
+        global_mqtt.initialized = False
+        
+        if within_mutex:
+            device_id = global_mqtt.device_id
+            broker_host = global_mqtt.broker_host
+            broker_port = global_mqtt.broker_port
+        else:
+            with mqtt_mutex:
+                device_id = global_mqtt.device_id
+                broker_host = global_mqtt.broker_host
+                broker_port = global_mqtt.broker_port
+        
+        if not within_mutex:
+            return init_mqtt(device_id, broker_host, broker_port)
+        else:
+            return False
+    except Exception as e:
+        print(f"[MQTT] ERROR: Reconnection attempt failed: {e}")
+        return False
+
 def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None, broker_port: int = 8883) -> bool:
     global global_mqtt
     
@@ -68,7 +139,7 @@ def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None
         return False
     
     with mqtt_mutex:
-        if global_mqtt.initialized:
+        if global_mqtt.initialized and global_mqtt.client and global_mqtt.client.is_connected():
             return True
         
         if not device_id:
@@ -81,6 +152,13 @@ def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None
             broker_host = "a1d6e0zlehb0v9-ats.iot.us-west-2.amazonaws.com"
         
         try:
+            if global_mqtt.client:
+                try:
+                    global_mqtt.client.loop_stop()
+                    global_mqtt.client.disconnect()
+                except Exception:
+                    pass
+            
             global_mqtt.device_id = device_id
             global_mqtt.broker_host = broker_host
             global_mqtt.broker_port = broker_port
@@ -91,6 +169,8 @@ def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None
             global_mqtt.client_key_path = key_path
             
             global_mqtt.client = mqtt.Client(client_id=device_id)
+            global_mqtt.client.on_connect = _on_connect
+            global_mqtt.client.on_disconnect = _on_disconnect
             
             if ca_path and cert_path and key_path:
                 global_mqtt.client.tls_set(
@@ -106,7 +186,7 @@ def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None
             global_mqtt.client.connect(broker_host, broker_port, 60)
             global_mqtt.client.loop_start()
             
-            time.sleep(1)
+            time.sleep(2)
             
             if global_mqtt.client.is_connected():
                 global_mqtt.connected = True
@@ -119,6 +199,8 @@ def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None
                 return False
         except Exception as e:
             print(f"[MQTT] ERROR: Failed to initialize MQTT: {e}")
+            import traceback
+            traceback.print_exc()
             global_mqtt.initialized = True
             return False
 
@@ -129,20 +211,40 @@ def mqtt_publish(topic: str, payload: str) -> bool:
         return False
     
     with mqtt_mutex:
+        needs_reinit = False
         if not global_mqtt.initialized or not global_mqtt.client:
+            if global_mqtt.device_id and global_mqtt.broker_host:
+                needs_reinit = True
+            else:
+                return False
+        
+            if global_mqtt.client and not global_mqtt.client.is_connected():
+                reconnect_result = _reconnect_mqtt(within_mutex=True)
+                if not reconnect_result:
+                    if not global_mqtt.initialized:
+                        needs_reinit = True
+                    else:
+                        return False
+                elif not global_mqtt.client or not global_mqtt.client.is_connected():
+                    if not global_mqtt.initialized:
+                        needs_reinit = True
+                    else:
+                        return False
+        
+        if needs_reinit:
+            device_id = global_mqtt.device_id
+            broker_host = global_mqtt.broker_host
+            broker_port = global_mqtt.broker_port
+    
+    if needs_reinit:
+        if not init_mqtt(device_id, broker_host, broker_port):
+            return False
+    
+    with mqtt_mutex:
+        if not global_mqtt.client or not global_mqtt.client.is_connected():
             return False
         
         try:
-            if not global_mqtt.client.is_connected():
-                print("[MQTT] Connection lost, attempting to reconnect...")
-                global_mqtt.client.reconnect()
-                time.sleep(0.5)
-                if not global_mqtt.client.is_connected():
-                    print("[MQTT] ERROR: Reconnection failed")
-                    global_mqtt.connected = False
-                    return False
-                global_mqtt.connected = True
-                print("[MQTT] Reconnected successfully")
             
             result = global_mqtt.client.publish(topic, payload, qos=1)
             result.wait_for_publish(timeout=2.0)

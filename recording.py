@@ -89,9 +89,9 @@ class RecordingManager:
             
             timestamp = int(time.time() * 1000)
             if tone_type == "new":
-                filename = f"{self.temp_dir}/recording_{channel_id}_new_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
+                filename = f"{self.temp_dir}/new_tone_{channel_id}_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
             else:
-                filename = f"{self.temp_dir}/recording_{channel_id}_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
+                filename = f"{self.temp_dir}/defined_tone_{channel_id}_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
             
             try:
                 recording_file = open(filename, 'wb')
@@ -222,9 +222,13 @@ class RecordingManager:
                     session.recording_file.seek(0)
                     write_wav_header(session.recording_file, SAMPLE_RATE, BITS_PER_SAMPLE, CHANNELS, data_bytes)
                     session.recording_file.close()
-                    print(f"[RECORDING] Stopped recording: {session.filename} ({session.samples_written} samples)")
+                    duration_sec = (int(time.time() * 1000) - session.start_time_ms) / 1000.0
+                    print(f"[RECORDING] Stopped recording: {session.filename}")
+                    print(f"[RECORDING]   Duration: {duration_sec:.2f} seconds, Samples: {session.samples_written}, Size: {data_bytes} bytes")
                 except Exception as e:
                     print(f"[RECORDING] ERROR: Failed to finalize WAV file: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             filename = session.filename
             tone_type = session.tone_type
@@ -235,8 +239,14 @@ class RecordingManager:
             if channel_id in self.active_sessions:
                 del self.active_sessions[channel_id]
         
-        if filename and os.path.exists(filename):
-            self._upload_to_s3(filename, tone_type, tone_a_hz, tone_b_hz, channel_id)
+        if filename:
+            if os.path.exists(filename):
+                file_size = os.path.getsize(filename)
+                print(f"[RECORDING] Recording completed, file size: {file_size} bytes")
+                print(f"[RECORDING] Starting S3 upload for: {filename}")
+                self._upload_to_s3(filename, tone_type, tone_a_hz, tone_b_hz, channel_id)
+            else:
+                print(f"[RECORDING] WARNING: Recording file not found: {filename}")
     
     def _upload_to_s3(self, file_path: str, tone_type: str, tone_a_hz: float, tone_b_hz: float, channel_id: str):
         if not S3_AVAILABLE:
@@ -245,17 +255,25 @@ class RecordingManager:
         
         def upload_thread():
             try:
+                print(f"[RECORDING] S3 upload thread started for: {file_path}")
+                file_size = os.path.getsize(file_path)
+                print(f"[RECORDING] File size: {file_size} bytes ({file_size / 1024 / 1024:.2f} MB)")
+                
                 s3_client = boto3.client('s3', region_name=S3_REGION)
                 
                 timestamp = int(time.time() * 1000)
                 if tone_type == "new":
-                    s3_key = f"audio_recordings/{channel_id}_new_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
+                    s3_key = f"audio_recordings/new_tone_{channel_id}_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
                 else:
-                    s3_key = f"audio_recordings/{channel_id}_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
+                    s3_key = f"audio_recordings/defined_tone_{channel_id}_{tone_a_hz:.1f}_{tone_b_hz:.1f}_{timestamp}.wav"
                 
                 print(f"[RECORDING] Uploading to S3: s3://{S3_BUCKET_NAME}/{s3_key}")
+                print(f"[RECORDING] Bucket: {S3_BUCKET_NAME}, Region: {S3_REGION}")
+                
                 s3_client.upload_file(file_path, S3_BUCKET_NAME, s3_key)
+                
                 print(f"[RECORDING] ✓ Successfully uploaded to S3: {s3_key}")
+                print(f"[RECORDING] S3 URL: https://{S3_BUCKET_NAME}.s3.{S3_REGION}.amazonaws.com/{s3_key}")
                 
                 try:
                     os.remove(file_path)
@@ -265,12 +283,18 @@ class RecordingManager:
             except ClientError as e:
                 error_code = e.response.get('Error', {}).get('Code', 'Unknown')
                 print(f"[RECORDING] ERROR: S3 upload failed ({error_code}): {e}")
+                import traceback
+                traceback.print_exc()
                 print(f"[RECORDING] Keeping local file: {file_path}")
             except BotoCoreError as e:
                 print(f"[RECORDING] ERROR: S3 client error: {e}")
+                import traceback
+                traceback.print_exc()
                 print(f"[RECORDING] Keeping local file: {file_path}")
             except Exception as e:
                 print(f"[RECORDING] ERROR: Unexpected error during S3 upload: {e}")
+                import traceback
+                traceback.print_exc()
                 print(f"[RECORDING] Keeping local file: {file_path}")
         
         upload_thread_obj = threading.Thread(target=upload_thread, daemon=True)
@@ -279,10 +303,15 @@ class RecordingManager:
     def cleanup_expired_sessions(self):
         with self.mutex:
             current_time_ms = int(time.time() * 1000)
-            expired = [ch_id for ch_id, session in self.active_sessions.items() 
-                      if current_time_ms >= session.end_time_ms]
-            for ch_id in expired:
-                self._stop_session(ch_id)
+            expired = []
+            for ch_id, session in self.active_sessions.items():
+                if current_time_ms >= session.end_time_ms:
+                    expired.append(ch_id)
+                    remaining_ms = current_time_ms - session.end_time_ms
+                    print(f"[RECORDING] Session expired for {ch_id} ({remaining_ms} ms past end time)")
+        
+        for ch_id in expired:
+            self._stop_session(ch_id)
     
     def stop_recording(self, channel_id: str):
         with self.mutex:
