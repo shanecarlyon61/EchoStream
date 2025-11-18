@@ -100,6 +100,22 @@ class PassthroughManager:
                     print(f"[PASSTHROUGH] WARNING: No audio device available for channel index {target_index} (target: {target_channel_id})")
             
             self.active_sessions[source_channel_id] = session
+            
+            if source_channel_id not in self.audio_queues:
+                self.audio_queues[source_channel_id] = deque(maxlen=10)
+                print(f"[PASSTHROUGH] Created audio queue for {source_channel_id}")
+            
+            if source_channel_id not in self.write_threads_running:
+                self.write_threads_running[source_channel_id] = True
+                thread = threading.Thread(
+                    target=self._write_worker,
+                    args=(source_channel_id,),
+                    daemon=True
+                )
+                self.write_threads[source_channel_id] = thread
+                thread.start()
+                print(f"[PASSTHROUGH] Started write thread for channel {source_channel_id}")
+            
             print(f"[PASSTHROUGH] Started: {source_channel_id} -> {target_channel_id}, duration={duration_ms} ms")
             return True
     
@@ -187,7 +203,6 @@ class PassthroughManager:
     
     def route_audio(self, source_channel_id: str, audio_samples: np.ndarray) -> bool:
         try:
-            queue = None
             with self.mutex:
                 if source_channel_id not in self.active_sessions:
                     return False
@@ -201,21 +216,11 @@ class PassthroughManager:
                 
                 if source_channel_id not in self.audio_queues:
                     self.audio_queues[source_channel_id] = deque(maxlen=10)
+                    print(f"[PASSTHROUGH] Created audio queue for {source_channel_id} in route_audio")
                 
                 queue = self.audio_queues[source_channel_id]
-                
-                if source_channel_id not in self.write_threads_running:
-                    self.write_threads_running[source_channel_id] = True
-                    thread = threading.Thread(
-                        target=self._write_worker,
-                        args=(source_channel_id,),
-                        daemon=True
-                    )
-                    self.write_threads[source_channel_id] = thread
-                    thread.start()
-                    print(f"[PASSTHROUGH] Started write thread for channel {source_channel_id}")
             
-            if queue:
+            if queue is not None:
                 try:
                     pcm = (np.clip(audio_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
                     pcm_bytes = pcm.tobytes()
@@ -224,11 +229,13 @@ class PassthroughManager:
                 except Exception as e:
                     print(f"[PASSTHROUGH] ERROR: Failed to queue audio: {e}")
             else:
-                print(f"[PASSTHROUGH] WARNING: Queue not found for {source_channel_id}")
+                print(f"[PASSTHROUGH] WARNING: Queue is None for {source_channel_id}")
             
             return False
         except Exception as e:
             print(f"[PASSTHROUGH] ERROR: Exception in route_audio: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _stop_session(self, source_channel_id: str):
