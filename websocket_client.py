@@ -2,6 +2,7 @@ import threading
 import asyncio
 import websockets
 import json
+import time
 from typing import Optional, Dict, Any, Callable, List
 
 global_interrupted = threading.Event()
@@ -458,7 +459,8 @@ async def websocket_handler_async(url: str):
                 await asyncio.sleep(reconnect_delay)
                 
                 if await connect_to_server_async(url):
-                    print("[WEBSOCKET] Reconnected successfully")
+                    print("[WEBSOCKET] Reconnected successfully - waiting 0.5s before sending connect messages...")
+                    await asyncio.sleep(0.5)
                     reconnect_delay = 1.0
                     
                     if registered_channels:
@@ -468,6 +470,7 @@ async def websocket_handler_async(url: str):
                                 print(f"[WEBSOCKET] ✓ Re-sent connect message for channel {ch_id}")
                             else:
                                 print(f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}")
+                            await asyncio.sleep(0.1)
                     elif pending_register_ids:
                         print(f"[WEBSOCKET] Re-sending connect messages for {len(pending_register_ids)} pending channel(s)")
                         for ch_id in list(pending_register_ids):
@@ -477,14 +480,27 @@ async def websocket_handler_async(url: str):
                                 print(f"[WEBSOCKET] ✓ Re-sent connect message for channel {ch_id}")
                             else:
                                 print(f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}")
+                            await asyncio.sleep(0.1)
                         pending_register_ids.clear()
                 else:
                     reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                     continue
 
+            last_keepalive_time = 0
+            keepalive_interval = 30.0
+            
             while not global_interrupted.is_set() and ws_connected:
                 if global_ws_client is None:
                     break
+                
+                current_time = time.time()
+                if current_time - last_keepalive_time >= keepalive_interval:
+                    if registered_channels:
+                        print(f"[WEBSOCKET] Sending keep-alive connect messages for {len(registered_channels)} channel(s)")
+                        for ch_id in list(registered_channels):
+                            send_connect_message(ch_id)
+                            await asyncio.sleep(0.1)
+                        last_keepalive_time = current_time
 
                 try:
                     message = await asyncio.wait_for(
@@ -619,7 +635,10 @@ def global_websocket_thread(url: str):
             traceback.print_exc()
 
         if ws_connected:
-            print("[WEBSOCKET] Initial connection successful - sending connect messages for all configured channels")
+            print("[WEBSOCKET] Initial connection successful - waiting 0.5s before sending connect messages...")
+            import time
+            time.sleep(0.5)
+            
             try:
                 if pending_register_ids:
                     print(f"[WEBSOCKET] Sending connect messages for {len(pending_register_ids)} configured channel(s)")
@@ -628,6 +647,7 @@ def global_websocket_thread(url: str):
                             if ch_id not in registered_channels:
                                 registered_channels.append(ch_id)
                             print(f"[WEBSOCKET] ✓ Connect message sent for channel {ch_id}")
+                            time.sleep(0.1)
                         else:
                             print(f"[WEBSOCKET] ✗ Failed to send connect message for channel {ch_id}")
                     pending_register_ids.clear()
