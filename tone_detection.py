@@ -72,6 +72,8 @@ class ChannelToneDetector:
         self.tone_b_miss_streak: Dict[str, int] = {}
         self.tone_a_last_seen: Dict[str, int] = {}
         self.tone_b_last_seen: Dict[str, int] = {}
+        self.tone_a_confirmed_end: Dict[str, int] = {}  # Track when Tone A ended (for sequence validation)
+        self.intervening_tones_detected: Dict[str, bool] = {}  # Track if other tones appeared between A and B
         
         self.new_tone_tracking: List[Dict[str, Any]] = []
         for i in range(10):
@@ -99,6 +101,8 @@ class ChannelToneDetector:
             self.tone_b_miss_streak[tone_id] = 0
             self.tone_a_last_seen[tone_id] = 0
             self.tone_b_last_seen[tone_id] = 0
+            self.tone_a_confirmed_end[tone_id] = 0
+            self.intervening_tones_detected[tone_id] = False
         
     def add_audio_samples(self, samples: np.ndarray):
         with self.mutex:
@@ -145,6 +149,26 @@ class ChannelToneDetector:
                 return True
         return False
     
+    def _check_for_intervening_tones(self, peak_freqs: List[float], tone_def: Dict[str, Any], tone_id: str) -> bool:
+        """Check if any other tones (from other definitions) appear in current peak frequencies.
+        This is used to invalidate sequences where other tones appear between Tone A and Tone B."""
+        for other_tone_def in self.tone_definitions:
+            if other_tone_def["tone_id"] == tone_id:
+                continue
+            
+            # Check if Tone A or Tone B from other definitions appear
+            other_tone_a_detected = self._check_tone_frequency(
+                peak_freqs, other_tone_def["tone_a"], other_tone_def["tone_a_range"]
+            )
+            other_tone_b_detected = self._check_tone_frequency(
+                peak_freqs, other_tone_def["tone_b"], other_tone_def["tone_b_range"]
+            )
+            
+            if other_tone_a_detected or other_tone_b_detected:
+                return True
+        
+        return False
+    
     def process_audio(self) -> Optional[Dict[str, Any]]:
         with self.mutex:
             if len(self.audio_buffer) < FFT_SIZE:
@@ -171,9 +195,12 @@ class ChannelToneDetector:
                         peak_freqs, tone_def["tone_b"], tone_def["tone_b_range"]
                     )
                     if tone_b_detected:
+                        # If Tone B appears before Tone A is confirmed, reset Tone A tracking
                         self.tone_a_hit_streak[tone_id] = 0
                         self.tone_a_tracking[tone_id] = False
                         self.tone_a_tracking_start[tone_id] = 0
+                        self.tone_a_confirmed_end[tone_id] = 0
+                        self.intervening_tones_detected[tone_id] = False
                         continue
                     
                     tone_a_detected = self._check_tone_frequency(
@@ -222,6 +249,8 @@ class ChannelToneDetector:
                                     self.tone_a_tracking[tone_id] = False
                                     self.tone_a_tracking_start[tone_id] = 0
                                     self.tone_a_hit_streak[tone_id] = 0
+                                    self.tone_a_confirmed_end[tone_id] = 0
+                                    self.intervening_tones_detected[tone_id] = False
                                     print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                           f"Tone A tracking reset - frequency lost "
                                           f"(after {tracking_duration} ms, needed {required_duration} ms, "
@@ -244,6 +273,8 @@ class ChannelToneDetector:
                         duration = current_time_ms - self.tone_a_tracking_start[tone_id]
                         if duration >= tone_def["tone_a_length_ms"]:
                             self.tone_a_confirmed[tone_id] = True
+                            self.tone_a_confirmed_end[tone_id] = current_time_ms  # Mark when Tone A ended
+                            self.intervening_tones_detected[tone_id] = False  # Reset intervening tones flag
                             matching_freq = next(
                                 (f for f in peak_freqs 
                                  if is_frequency_in_range(f, tone_def["tone_a"], 
@@ -259,6 +290,15 @@ class ChannelToneDetector:
                                   f"Tone ID: {tone_id}")
                 
                 elif not self.tone_b_confirmed.get(tone_id, False):
+                    # Check for intervening tones (other tones between A and B)
+                    if self.tone_a_confirmed.get(tone_id, False):
+                        has_intervening_tones = self._check_for_intervening_tones(peak_freqs, tone_def, tone_id)
+                        if has_intervening_tones:
+                            self.intervening_tones_detected[tone_id] = True
+                            print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                  f"Intervening tone detected between Tone A and Tone B for {tone_id}! "
+                                  f"Sequence will be invalidated.")
+                    
                     tone_b_detected = self._check_tone_frequency(
                         peak_freqs, tone_def["tone_b"], tone_def["tone_b_range"]
                     )
@@ -272,6 +312,29 @@ class ChannelToneDetector:
                             
                             duration = current_time_ms - self.tone_b_tracking_start.get(tone_id, 0)
                             if duration >= tone_def["tone_b_length_ms"]:
+                                # Check if intervening tones were detected - if so, invalidate sequence
+                                if self.intervening_tones_detected.get(tone_id, False):
+                                    print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                          f"INVALID SEQUENCE for {tone_id}! "
+                                          f"Other tones detected between Tone A and Tone B. "
+                                          f"Sequence rejected.")
+                                    # Reset all state for this tone
+                                    self.tone_a_confirmed[tone_id] = False
+                                    self.tone_b_confirmed[tone_id] = False
+                                    self.tone_a_tracking[tone_id] = False
+                                    self.tone_b_tracking[tone_id] = False
+                                    self.tone_a_tracking_start[tone_id] = 0
+                                    self.tone_b_tracking_start[tone_id] = 0
+                                    self.tone_a_hit_streak[tone_id] = 0
+                                    self.tone_b_hit_streak[tone_id] = 0
+                                    self.tone_a_miss_streak[tone_id] = 0
+                                    self.tone_b_miss_streak[tone_id] = 0
+                                    self.tone_a_last_seen[tone_id] = 0
+                                    self.tone_b_last_seen[tone_id] = 0
+                                    self.tone_a_confirmed_end[tone_id] = 0
+                                    self.intervening_tones_detected[tone_id] = False
+                                    continue
+                                
                                 self.tone_b_confirmed[tone_id] = True
                                 matching_freq_b = next(
                                     (f for f in peak_freqs 
@@ -358,6 +421,8 @@ class ChannelToneDetector:
                                 self.tone_b_miss_streak[tone_id] = 0
                                 self.tone_a_last_seen[tone_id] = 0
                                 self.tone_b_last_seen[tone_id] = 0
+                                self.tone_a_confirmed_end[tone_id] = 0
+                                self.intervening_tones_detected[tone_id] = False
                                 
                                 return tone_def
                         
@@ -396,6 +461,13 @@ class ChannelToneDetector:
                                     self.tone_b_tracking[tone_id] = False
                                     self.tone_b_tracking_start[tone_id] = 0
                                     self.tone_b_hit_streak[tone_id] = 0
+                                    # If Tone B tracking is lost, also reset Tone A confirmed state to restart sequence
+                                    if self.tone_a_confirmed.get(tone_id, False):
+                                        self.tone_a_confirmed[tone_id] = False
+                                        self.tone_a_confirmed_end[tone_id] = 0
+                                        self.intervening_tones_detected[tone_id] = False
+                                        print(f"[TONE DETECTION] Channel {self.channel_id}: "
+                                              f"Tone B tracking lost - resetting Tone A confirmed state")
                                     print(f"[TONE DETECTION] Channel {self.channel_id}: "
                                           f"Tone B tracking reset - frequency lost "
                                           f"(after {tracking_duration} ms, needed {required_duration} ms, "
@@ -489,37 +561,72 @@ class ChannelToneDetector:
                         idx_a, idx_b = idx_b, idx_a
                         tone_a, tone_b = tone_b, tone_a
                     
-                    print(f"[NEW TONE PAIR] Channel {self.channel_id}: "
-                          f"A={tone_a:.1f} Hz, B={tone_b:.1f} Hz "
-                          f"(each ≥ {self.new_tone_length_ms} ms, ±{self.new_tone_range_hz} Hz stable)")
+                    # Check if there are other tones (confirmed or tracking) between tone_a and tone_b
+                    # A valid sequence requires tone B to immediately follow tone A with no other tones in between
+                    tone_a_end_time = self.new_tone_tracking[idx_a]["tracking_start"] + self.new_tone_length_ms
+                    tone_b_start_time = self.new_tone_tracking[idx_b]["tracking_start"]
                     
-                    if len(self.detected_frequencies) < 100:
-                        self.detected_frequencies.append(tone_a)
-                    if len(self.detected_frequencies) < 100:
-                        self.detected_frequencies.append(tone_b)
+                    has_intervening_tones = False
+                    # Check all tracking tones (confirmed or not) for intervening tones
+                    # A valid sequence requires tone B to start immediately after tone A ends, with no other tones in between
+                    for t in range(10):
+                        if not self.new_tone_tracking[t]["is_tracking"]:
+                            continue
+                        if t == idx_a or t == idx_b:
+                            continue
+                        
+                        other_start_time = self.new_tone_tracking[t]["tracking_start"]
+                        # If another tone starts between tone_a ending and tone_b starting, it's intervening
+                        if tone_a_end_time <= other_start_time <= tone_b_start_time:
+                            has_intervening_tones = True
+                            break
                     
-                    if MQTT_AVAILABLE:
-                        publish_new_tone_pair(tone_a, tone_b)
-                    
-                    try:
-                        from recording import global_recording_manager
-                        if hasattr(self, 'new_tone_config') and self.new_tone_config:
-                            new_tone_length_ms = self.new_tone_config.get("new_tone_length_ms", 0)
-                            if new_tone_length_ms > 0:
-                                global_recording_manager.start_recording(
-                                    self.channel_id, "new", tone_a, tone_b, new_tone_length_ms
-                                )
-                    except Exception as e:
-                        print(f"[RECORDING] ERROR: Failed to start new tone recording: {e}")
-                    
-                    self.new_tone_tracking[idx_a]["is_tracking"] = False
-                    self.new_tone_tracking[idx_a]["tracking_start"] = 0
-                    self.new_tone_tracking[idx_a]["hit_streak"] = 0
-                    self.new_tone_tracking[idx_a]["miss_streak"] = 0
-                    self.new_tone_tracking[idx_b]["is_tracking"] = False
-                    self.new_tone_tracking[idx_b]["tracking_start"] = 0
-                    self.new_tone_tracking[idx_b]["hit_streak"] = 0
-                    self.new_tone_tracking[idx_b]["miss_streak"] = 0
+                    if has_intervening_tones:
+                        print(f"[NEW TONE PAIR] Channel {self.channel_id}: "
+                              f"INVALID SEQUENCE! Other tones detected between "
+                              f"A={tone_a:.1f} Hz and B={tone_b:.1f} Hz. "
+                              f"Sequence rejected.")
+                        # Reset these two tones
+                        self.new_tone_tracking[idx_a]["is_tracking"] = False
+                        self.new_tone_tracking[idx_a]["tracking_start"] = 0
+                        self.new_tone_tracking[idx_a]["hit_streak"] = 0
+                        self.new_tone_tracking[idx_a]["miss_streak"] = 0
+                        self.new_tone_tracking[idx_b]["is_tracking"] = False
+                        self.new_tone_tracking[idx_b]["tracking_start"] = 0
+                        self.new_tone_tracking[idx_b]["hit_streak"] = 0
+                        self.new_tone_tracking[idx_b]["miss_streak"] = 0
+                    else:
+                        print(f"[NEW TONE PAIR] Channel {self.channel_id}: "
+                              f"A={tone_a:.1f} Hz, B={tone_b:.1f} Hz "
+                              f"(each ≥ {self.new_tone_length_ms} ms, ±{self.new_tone_range_hz} Hz stable)")
+                        
+                        if len(self.detected_frequencies) < 100:
+                            self.detected_frequencies.append(tone_a)
+                        if len(self.detected_frequencies) < 100:
+                            self.detected_frequencies.append(tone_b)
+                        
+                        if MQTT_AVAILABLE:
+                            publish_new_tone_pair(tone_a, tone_b)
+                        
+                        try:
+                            from recording import global_recording_manager
+                            if hasattr(self, 'new_tone_config') and self.new_tone_config:
+                                new_tone_length_ms = self.new_tone_config.get("new_tone_length_ms", 0)
+                                if new_tone_length_ms > 0:
+                                    global_recording_manager.start_recording(
+                                        self.channel_id, "new", tone_a, tone_b, new_tone_length_ms
+                                    )
+                        except Exception as e:
+                            print(f"[RECORDING] ERROR: Failed to start new tone recording: {e}")
+                        
+                        self.new_tone_tracking[idx_a]["is_tracking"] = False
+                        self.new_tone_tracking[idx_a]["tracking_start"] = 0
+                        self.new_tone_tracking[idx_a]["hit_streak"] = 0
+                        self.new_tone_tracking[idx_a]["miss_streak"] = 0
+                        self.new_tone_tracking[idx_b]["is_tracking"] = False
+                        self.new_tone_tracking[idx_b]["tracking_start"] = 0
+                        self.new_tone_tracking[idx_b]["hit_streak"] = 0
+                        self.new_tone_tracking[idx_b]["miss_streak"] = 0
         
         for t in range(10):
             if self.new_tone_tracking[t]["is_tracking"]:
