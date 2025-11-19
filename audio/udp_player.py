@@ -8,7 +8,7 @@ import errno
 import numpy as np
 from typing import Dict, Optional, List, Tuple, Any
 
-from audio_devices import (
+from audio.devices import (
     select_output_device_for_channel,
     open_output_stream,
     close_stream,
@@ -31,11 +31,11 @@ except Exception:
     HAS_OPUS = False
 
 try:
-    from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config, get_channel_ids
-    from frequency_filter import apply_audio_frequency_filters
-    from tone_detection import init_channel_detector, process_audio_for_channel
-    from passthrough import global_passthrough_manager
-    from recording import global_recording_manager
+    from core.config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config, get_channel_ids
+    from audio.filter import apply_audio_frequency_filters
+    from processing.tone_detection import init_channel_detector, process_audio_for_channel
+    from processing.passthrough import global_passthrough_manager
+    from processing.recording import global_recording_manager
     HAS_FREQ_FILTER = True
     HAS_TONE_DETECT = True
     HAS_PASSTHROUGH = True
@@ -515,7 +515,7 @@ class UDPPlayer:
         while self._running.is_set() and self._transmitting.get(channel_index, False):
             # Check GPIO state - only send when GPIO is active (value 0)
             try:
-                from gpio_monitor import GPIO_PINS, gpio_states
+                from hardware.gpio import GPIO_PINS, gpio_states
                 gpio_keys = list(GPIO_PINS.keys())
                 if channel_index < len(gpio_keys):
                     gpio_num = gpio_keys[channel_index]

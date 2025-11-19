@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Any
 from numpy.fft import rfft
 
 try:
-    from mqtt_client import publish_known_tone_detection, publish_new_tone_pair
+    from communication.mqtt import publish_known_tone_detection, publish_new_tone_pair
     MQTT_AVAILABLE = True
 except ImportError:
     MQTT_AVAILABLE = False
@@ -386,7 +386,7 @@ class ChannelToneDetector:
                                     )
                                 
                                 try:
-                                    from passthrough import global_passthrough_manager
+                                    from processing.passthrough import global_passthrough_manager
                                     if hasattr(self, 'passthrough_config') and self.passthrough_config.get("tone_passthrough", False):
                                         target_channel = self.passthrough_config.get("passthrough_channel", "")
                                         record_length_ms = tone_def.get("record_length_ms", 0)
@@ -399,7 +399,7 @@ class ChannelToneDetector:
                                     print(f"[PASSTHROUGH] ERROR: Failed to trigger passthrough: {e}")
                                 
                                 try:
-                                    from recording import global_recording_manager
+                                    from processing.recording import global_recording_manager
                                     record_length_ms = tone_def.get("record_length_ms", 0)
                                     if record_length_ms > 0:
                                         global_recording_manager.start_recording(

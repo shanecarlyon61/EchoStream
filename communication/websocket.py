@@ -11,8 +11,8 @@ _audio_streams_by_channel: Dict[int, Dict[str, object]] = {}
 _channel_output_device_index: Dict[int, int] = {}
 
 try:
-    from audio_devices import select_output_device_for_channel, open_output_stream, close_stream
-    from gpio_monitor import GPIO_PINS, gpio_states
+    from audio.devices import select_output_device_for_channel, open_output_stream, close_stream
+    from hardware.gpio import GPIO_PINS, gpio_states
     _AUDIO_OK = True
 except Exception as _e:
     print(f"[WEBSOCKET] WARNING: Audio/GPIO modules not fully available: {_e}")
@@ -539,7 +539,7 @@ async def websocket_handler_async(url: str):
                             except Exception as e:
                                 print(f"[WEBSOCKET] ERROR: Exception in UDP config callback: {e}")
                         try:
-                            from udp_player import global_udp_player
+                            from audio.udp_player import global_udp_player
                             udp_port = int(udp_config.get('udp_port', 0) or 0)
                             udp_host = str(udp_config.get('udp_host', ''))
                             aes_key = str(udp_config.get('aes_key', '') or '')

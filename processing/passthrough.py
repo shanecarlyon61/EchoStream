@@ -5,7 +5,7 @@ from collections import deque
 import numpy as np
 
 try:
-    from audio_devices import select_output_device_for_channel, open_output_stream, close_stream
+    from audio.devices import select_output_device_for_channel, open_output_stream, close_stream
     HAS_AUDIO_DEVICES = True
 except ImportError:
     HAS_AUDIO_DEVICES = False

@@ -7,6 +7,7 @@ try:
 except Exception:
     HAS_LGPIO = False
     lgpio = None
+
 GPIO_PINS = {
     20: 38,
     21: 40,
@@ -139,5 +140,4 @@ def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100,
         pass
     except Exception as e:
         print(f"[GPIO] ERROR: Exception in monitor loop: {e}")
-
 
