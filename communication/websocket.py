@@ -544,9 +544,11 @@ async def websocket_handler_async(url: str):
                             udp_host = str(udp_config.get('udp_host', ''))
                             aes_key = str(udp_config.get('aes_key', '') or '')
                             
-                            if pending_register_ids:
-                                global_udp_player.set_channel_ids(pending_register_ids)
-                                print(f"[WEBSOCKET] Set channel IDs for UDP player: {pending_register_ids}")
+                            # Set channel IDs in UDP player (use registered_channels if available, otherwise pending_register_ids)
+                            channel_ids_to_set = registered_channels if registered_channels else pending_register_ids
+                            if channel_ids_to_set:
+                                global_udp_player.set_channel_ids(channel_ids_to_set)
+                                print(f"[WEBSOCKET] Set channel IDs for UDP player: {channel_ids_to_set}")
                             
                             if udp_port > 0:
                                 print(f"[WEBSOCKET] Starting UDP player: port={udp_port}, host={udp_host}, aes_key={'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}")
@@ -685,7 +687,7 @@ def start_websocket(url: str = "wss://audio.redenes.org/ws/", channel_ids: Optio
         pending_register_ids.clear()
         pending_register_ids.extend([str(c).strip() for c in channel_ids if str(c).strip()])
         try:
-            from udp_player import global_udp_player
+            from audio.udp_player import global_udp_player
             global_udp_player.set_channel_ids(channel_ids)
         except Exception:
             pass
