@@ -66,9 +66,9 @@ class PassthroughManager:
                     new_duration_ms = max(remaining_time_ms, duration_ms)
                     existing.end_time_ms = current_time_ms + new_duration_ms
                     existing.duration_ms = new_duration_ms
-                    print(f"[PASSTHROUGH] Session already active for {source_channel_id}, "
-                          f"remaining={remaining_time_ms} ms, new={duration_ms} ms, "
-                          f"using longer={new_duration_ms} ms")
+                    # print(f"[PASSTHROUGH] Session already active for {source_channel_id}, "
+                    #       f"remaining={remaining_time_ms} ms, new={duration_ms} ms, "
+                    #       f"using longer={new_duration_ms} ms")
                     return True
                 else:
                     self._stop_session(source_channel_id)
@@ -76,8 +76,8 @@ class PassthroughManager:
             target_index = self._get_target_channel_index(target_channel_id)
             if target_index is None:
                 print(f"[PASSTHROUGH] ERROR: Cannot find target channel index for '{target_channel_id}'")
-                print(f"[PASSTHROUGH] Available channel mappings: {list(self.channel_id_to_index.keys())}")
-                print(f"[PASSTHROUGH] Supported channel names: channel_one, channel_two, channel_three, channel_four")
+                # print(f"[PASSTHROUGH] Available channel mappings: {list(self.channel_id_to_index.keys())}")
+                # print(f"[PASSTHROUGH] Supported channel names: channel_one, channel_two, channel_three, channel_four")
                 return False
             
             session = PassthroughSession(source_channel_id, target_channel_id, duration_ms)

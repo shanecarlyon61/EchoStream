@@ -5,6 +5,8 @@ import time
 import uuid
 from typing import Optional, Dict, Any
 
+from core.config import get_device_id_from_config
+
 try:
     import paho.mqtt.client as mqtt
     MQTT_AVAILABLE = True
@@ -25,28 +27,6 @@ class MQTTState:
 
 global_mqtt = MQTTState()
 mqtt_mutex = threading.Lock()
-
-def get_device_id_from_config() -> Optional[str]:
-    config_path = os.path.expanduser("~/.an/config.json")
-    try:
-        with open(config_path, 'r') as f:
-            cfg = json.load(f)
-        
-        unique_id = cfg.get("unique_id")
-        if unique_id:
-            return unique_id
-        
-        unique_id = (
-            cfg.get("shadow", {})
-            .get("state", {})
-            .get("desired", {})
-            .get("unique_id", "")
-        )
-        if unique_id:
-            return unique_id
-    except Exception as e:
-        print(f"[MQTT] Error loading device ID from config: {e}")
-    return None
 
 def find_certificates():
     cert_dir = os.path.expanduser("~/.an")
@@ -84,7 +64,10 @@ def _on_disconnect(client, userdata, rc):
             7: "Network error"
         }
         rc_msg = rc_messages.get(rc, f"Unknown error")
-        print(f"[MQTT] Unexpected disconnection (rc={rc}: {rc_msg}), will attempt to reconnect")
+        # Don't spam logs for network errors - they're common and auto-reconnect handles them
+        if rc != 7:  # Only log non-network errors prominently
+            print(f"[MQTT] Unexpected disconnection (rc={rc}: {rc_msg}), will attempt to reconnect")
+        # Network errors (rc=7) are handled automatically by paho-mqtt's loop_start()
 
 def _reconnect_mqtt(within_mutex: bool = False) -> bool:
     global global_mqtt
@@ -209,7 +192,8 @@ def init_mqtt(device_id: Optional[str] = None, broker_host: Optional[str] = None
             
             print(f"[MQTT] Connecting to {broker_host}:{broker_port}...")
             try:
-                result = global_mqtt.client.connect(broker_host, broker_port, keepalive=60)
+                # Increase keepalive to 120 seconds to reduce disconnections
+                result = global_mqtt.client.connect(broker_host, broker_port, keepalive=120)
                 if result != mqtt.MQTT_ERR_SUCCESS:
                     print(f"[MQTT] ERROR: connect() returned error code: {result}")
                     global_mqtt.initialized = True
@@ -396,7 +380,6 @@ def publish_known_tone_detection(
         if result:
             print(f"[MQTT] ✓ Published known tone detection to '{topic}': "
                   f"A={tone_a_hz:.1f} Hz, B={tone_b_hz:.1f} Hz")
-            print(f"[MQTT]   Message payload: {json_payload}")
         else:
             print(f"[MQTT] ✗ Failed to publish known tone detection to '{topic}'")
         

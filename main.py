@@ -11,7 +11,8 @@ from typing import Dict
 from core.config import (
     load_config,
     get_channel_ids,
-    get_tone_detect_config
+    get_tone_detect_config,
+    get_device_id_from_config
 )
 from hardware.gpio import (
     init_gpio,
@@ -31,12 +32,14 @@ from communication.websocket import (
     send_transmit_event,
     request_register_channel
 )
+from communication.mqtt import init_mqtt, cleanup_mqtt
 
 
 def handle_shutdown(sig, frame):
     """Handle shutdown signals gracefully."""
     print("\n[MAIN] Shutdown signal received, cleaning up...")
     cleanup_gpio()
+    cleanup_mqtt()
     print("[MAIN] Cleanup complete")
     sys.exit(0)
 
@@ -64,6 +67,19 @@ def main() -> int:
         print("[MAIN] Tone detection per channel:")
         for cid, td in tone_map:
             print(f"  {cid}: tone_detect={'ENABLED' if td else 'DISABLED'}")
+
+    # Initialize MQTT connection early to keep it persistent
+    print("[MAIN] Initializing MQTT connection...")
+    device_id = get_device_id_from_config()
+    if device_id:
+        broker_host = "a1d6e0zlehb0v9-ats.iot.us-west-2.amazonaws.com"
+        broker_port = 8883
+        if init_mqtt(device_id, broker_host, broker_port):
+            print("[MAIN] ✓ MQTT connection established and will remain active")
+        else:
+            print("[MAIN] WARNING: MQTT initialization failed, will retry on first publish")
+    else:
+        print("[MAIN] WARNING: device_id not found, MQTT will initialize on first publish")
 
     # Enumerate audio output devices and align to channels
     try:

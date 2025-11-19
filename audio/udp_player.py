@@ -31,7 +31,7 @@ except Exception:
     HAS_OPUS = False
 
 try:
-    from core.config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config, get_channel_ids
+    from core.config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config, get_channel_ids, get_alert_details
     from audio.filter import apply_audio_frequency_filters
     from processing.tone_detection import init_channel_detector, process_audio_for_channel
     from processing.passthrough import global_passthrough_manager
@@ -52,6 +52,7 @@ except Exception as e:
     get_new_tone_config = None
     get_passthrough_config = None
     get_channel_ids = None
+    get_alert_details = None
     apply_audio_frequency_filters = None
     init_channel_detector = None
     process_audio_for_channel = None
@@ -83,6 +84,7 @@ class UDPPlayer:
         self._suppress_hb_log = os.getenv("ES_UDP_HEARTBEAT_LOG", "1") == "0"
         self._frequency_filters: Dict[str, List[Dict[str, Any]]] = {}
         self._tone_detect_enabled: Dict[str, bool] = {}
+        self._db_thresholds: Dict[str, float] = {}  # channel_id -> db threshold
         self._config_cache: Optional[Dict[str, Any]] = None
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
@@ -137,6 +139,7 @@ class UDPPlayer:
                 self._config_cache = load_config()
             self._frequency_filters.clear()
             self._tone_detect_enabled.clear()
+            self._db_thresholds.clear()
             tone_detect_map = {}
             if get_tone_detect_config:
                 tone_detect_map = dict(get_tone_detect_config(self._config_cache))
@@ -144,12 +147,22 @@ class UDPPlayer:
                 is_tone_detect_enabled = tone_detect_map.get(channel_id, False)
                 self._tone_detect_enabled[channel_id] = is_tone_detect_enabled
                 if is_tone_detect_enabled:
+                    # Load frequency filters
                     filters = get_frequency_filters(self._config_cache, channel_id)
                     if filters:
                         self._frequency_filters[channel_id] = filters
                         print(f"[UDP] Loaded {len(filters)} frequency filter(s) for tone detection on channel {channel_id}")
                     else:
                         self._frequency_filters[channel_id] = []
+                    
+                    # Load db threshold from alert_details
+                    if get_alert_details:
+                        alert_details = get_alert_details(self._config_cache, channel_id)
+                        db_threshold = float(alert_details.get("db", -20))
+                        self._db_thresholds[channel_id] = db_threshold
+                        print(f"[UDP] Loaded db threshold {db_threshold} dB for channel {channel_id}")
+                    else:
+                        self._db_thresholds[channel_id] = -20.0  # default
                     
                     if HAS_TONE_DETECT and get_tone_definitions and init_channel_detector:
                         tone_defs = get_tone_definitions(self._config_cache, channel_id)
@@ -159,6 +172,7 @@ class UDPPlayer:
                         passthrough_cfg = None
                         if get_passthrough_config:
                             passthrough_cfg = get_passthrough_config(self._config_cache, channel_id)
+                        
                         if tone_defs or (new_tone_cfg and new_tone_cfg.get("detect_new_tones", False)):
                             init_channel_detector(channel_id, tone_defs, new_tone_cfg, passthrough_cfg)
                             print(f"[UDP] Initialized tone detection for channel {channel_id} "
@@ -556,8 +570,9 @@ class UDPPlayer:
                             try:
                                 filters = self._frequency_filters.get(channel_id, [])
                                 if filters:
+                                    db_threshold = self._db_thresholds.get(channel_id, -20.0)
                                     filtered_audio = apply_audio_frequency_filters(
-                                        audio_chunk, filters, sample_rate=48000
+                                        audio_chunk, filters, sample_rate=48000, db_threshold=db_threshold
                                     )
                                 else:
                                     filtered_audio = audio_chunk
