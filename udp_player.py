@@ -33,7 +33,7 @@ except Exception:
 try:
     from config import load_config, get_frequency_filters, get_tone_detect_config, get_tone_definitions, get_new_tone_config, get_passthrough_config, get_channel_ids
     from frequency_filter import apply_audio_frequency_filters
-    from tone_detection import init_channel_detector, process_audio_for_channel
+    from tone_detection import init_channel_detector, process_audio_for_channel, add_audio_samples_for_channel
     from passthrough import global_passthrough_manager
     from recording import global_recording_manager
     HAS_FREQ_FILTER = True
@@ -55,6 +55,7 @@ except Exception as e:
     apply_audio_frequency_filters = None
     init_channel_detector = None
     process_audio_for_channel = None
+    add_audio_samples_for_channel = None
     global_passthrough_manager = None
     global_recording_manager = None
     HAS_RECORDING = False
@@ -84,6 +85,9 @@ class UDPPlayer:
         self._frequency_filters: Dict[str, List[Dict[str, Any]]] = {}
         self._tone_detect_enabled: Dict[str, bool] = {}
         self._config_cache: Optional[Dict[str, Any]] = None
+        # Tone detection throttling: only process every 250ms (not every 40ms chunk)
+        self._last_tone_check_time: Dict[str, float] = {}
+        self._tone_check_interval = 0.25  # 250ms between tone detection processing
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
         with self._lock:
@@ -549,9 +553,10 @@ class UDPPlayer:
                     if bundle[buffer_pos_key] >= 1920:
                         audio_chunk = input_buffer[:1920].copy()
                         
+                        # Tone detection with throttling to avoid blocking audio
                         if (HAS_TONE_DETECT and
                             self._tone_detect_enabled.get(channel_id, False) and
-                            process_audio_for_channel and
+                            add_audio_samples_for_channel and
                             apply_audio_frequency_filters):
                             try:
                                 filters = self._frequency_filters.get(channel_id, [])
@@ -562,12 +567,24 @@ class UDPPlayer:
                                 else:
                                     filtered_audio = audio_chunk
                                 
-                                detected_tone = process_audio_for_channel(
-                                    channel_id, filtered_audio
-                                )
-                                if detected_tone:
-                                    print(f"\n[UDP] *** TONE SEQUENCE DETECTED ON CHANNEL {channel_id} ***")
-                                    print(f"[UDP] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n")
+                                # Check if it's time to process (throttled to avoid blocking)
+                                current_time = time.time()
+                                last_check = self._last_tone_check_time.get(channel_id, 0.0)
+                                
+                                if current_time - last_check >= self._tone_check_interval:
+                                    # Time to process - this adds samples AND analyzes
+                                    self._last_tone_check_time[channel_id] = current_time
+                                    
+                                    if process_audio_for_channel:
+                                        detected_tone = process_audio_for_channel(
+                                            channel_id, filtered_audio
+                                        )
+                                        if detected_tone:
+                                            print(f"\n[UDP] *** TONE SEQUENCE DETECTED ON CHANNEL {channel_id} ***")
+                                            print(f"[UDP] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n")
+                                else:
+                                    # Just add samples to buffer (fast, no processing)
+                                    add_audio_samples_for_channel(channel_id, filtered_audio)
                             except Exception as e:
                                 if send_count <= 10:
                                     print(f"[AUDIO TX] WARNING: Tone detection "
