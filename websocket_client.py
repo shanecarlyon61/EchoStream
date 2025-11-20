@@ -515,10 +515,10 @@ async def websocket_handler_async(url: str):
                     message_text_stripped = message_text.strip()
 
                     if "users_connected" in message_text:
-                        print("=" * 60)
-                        print("[WEBSOCKET] Raw users_connected message detected:")
-                        print(f"  Raw message: {message_text[:500]}")
-                        print("=" * 60)
+                        # print("=" * 60)
+                        print("[WEBSOCKET] Raw users_connected message detected")
+                        # print(f"  Raw message: {message_text[:500]}")
+                        # print("=" * 60)
 
                     try:
                         if not message_text_stripped:
