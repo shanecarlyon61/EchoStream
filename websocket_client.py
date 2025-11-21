@@ -487,7 +487,7 @@ async def websocket_handler_async(url: str):
                     continue
 
             last_keepalive_time = 0
-            keepalive_interval = 30.0
+            keepalive_interval = 10.0
             
             while not global_interrupted.is_set() and ws_connected:
                 if global_ws_client is None:
