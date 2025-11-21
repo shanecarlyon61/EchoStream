@@ -185,8 +185,6 @@ class ChannelToneDetector:
         Returns:
             True if tone sequence detected, False otherwise
         """
-        buffer_array = self._get_buffer_array()
-
         # Get tone lengths in seconds
         tone_a_length_seconds = tone_def["tone_a_length_ms"] / 1000.0
         tone_b_length_seconds = tone_def["tone_b_length_ms"] / 1000.0
@@ -196,8 +194,28 @@ class ChannelToneDetector:
         tone_b_samples = int(tone_b_length_seconds * SAMPLE_RATE)
         total_samples = tone_a_samples + tone_b_samples
 
-        # Need at least total_samples in buffer
-        if len(buffer_array) < total_samples:
+        # OPTIMIZATION 1: Quick buffer size check BEFORE expensive conversion
+        with self.mutex:
+            buffer_len = len(self.audio_buffer)
+        
+        if buffer_len < total_samples:
+            return False
+
+        # OPTIMIZATION 2: Quick volume check on recent samples BEFORE expensive buffer conversion
+        # Check volume on last total_samples only (much faster than converting entire 10s buffer)
+        with self.mutex:
+            recent_samples_list = self.audio_buffer[-total_samples:]
+        
+        # Convert only the recent samples we need (not entire 480k buffer)
+        recent_samples = np.array(recent_samples_list, dtype=np.float32)
+        volume_db = calculate_rms_volume(recent_samples)
+        
+        # Debug: Log volume periodically
+        import random
+        if random.randint(1, 50) == 1:
+            print(f"[TONE DETECT] Channel {self.channel_id}: Volume={volume_db:.1f} dB (threshold=-20dB)")
+        
+        if volume_db < -20:  # -20dB threshold (like reference project)
             return False
 
         # Check minimum time since last detection (avoid duplicates)
@@ -207,21 +225,21 @@ class ChannelToneDetector:
         if time_since_last < MIN_DETECTION_INTERVAL_SECONDS:
             return False
 
-        # Check volume threshold (already filtered, but double-check)
-        recent_samples = buffer_array[-total_samples:]
-        _ = calculate_rms_volume(recent_samples)
-        # if volume_db < -20:  # -20dB threshold
-        #     return False
-
+        # OPTIMIZATION 3: Use already-converted recent_samples array (no duplicate conversion)
         try:
-            # Analyze Tone A window:
-            # [-(total_samples):-tone_b_samples]
-            tone_a_window = buffer_array[-(total_samples):-tone_b_samples]
+            # Analyze Tone A window: [0:tone_a_samples]
+            # (recent_samples already contains the last total_samples)
+            tone_a_window = recent_samples[0:tone_a_samples]
             tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
-            # Analyze Tone B window: last tone_b_samples
-            tone_b_window = buffer_array[-tone_b_samples:]
+            # Analyze Tone B window: [tone_a_samples:]
+            tone_b_window = recent_samples[tone_a_samples:]
             tone_b_freq = freq_from_fft(tone_b_window, SAMPLE_RATE)
+
+            # Debug: Log detected frequencies periodically
+            if random.randint(1, 50) == 1:
+                print(f"[TONE DETECT] Channel {self.channel_id}: Detected A={tone_a_freq:.1f}Hz, B={tone_b_freq:.1f}Hz | " +
+                      f"Target A={tone_def['tone_a']:.1f}Hz±{tone_def.get('tone_a_range', 10)}, B={tone_def['tone_b']:.1f}Hz±{tone_def.get('tone_b_range', 10)}")
 
             # Check if frequencies match defined tone
             tone_a_match = is_frequency_in_range(
@@ -345,14 +363,15 @@ class ChannelToneDetector:
         if not self.detect_new_tones:
             return False
 
-        buffer_array = self._get_buffer_array()
-
         # Calculate required samples for new tone length
         new_tone_samples = int(self.new_tone_length_seconds * SAMPLE_RATE)
         total_samples = 2 * new_tone_samples  # Need 2 tones worth
 
-        # Need at least total_samples in buffer
-        if len(buffer_array) < total_samples:
+        # OPTIMIZATION 1: Quick buffer size check BEFORE expensive conversion
+        with self.mutex:
+            buffer_len = len(self.audio_buffer)
+        
+        if buffer_len < total_samples:
             return False
 
         # Check minimum time since last detection
@@ -361,20 +380,27 @@ class ChannelToneDetector:
         if time_since_last < MIN_DETECTION_INTERVAL_SECONDS:
             return False
 
-        # Check volume threshold
-        recent_samples = buffer_array[-total_samples:]
-        _ = calculate_rms_volume(recent_samples)
-        # if volume_db < -20:  # -20dB threshold
-        #     return False
+        # OPTIMIZATION 2: Quick volume check on recent samples BEFORE expensive buffer conversion
+        # Check volume on last total_samples only (much faster than converting entire 10s buffer)
+        with self.mutex:
+            recent_samples_list = self.audio_buffer[-total_samples:]
+        
+        # Convert only the recent samples we need (not entire 480k buffer)
+        recent_samples = np.array(recent_samples_list, dtype=np.float32)
+        volume_db = calculate_rms_volume(recent_samples)
+        
+        if volume_db < -20:  # -20dB threshold (like reference project)
+            return False
 
+        # OPTIMIZATION 3: Use already-converted recent_samples array (no duplicate conversion)
         try:
-            # Analyze Tone A window:
-            # [-(2*new_tone_samples):-new_tone_samples]
-            tone_a_window = buffer_array[-(2 * new_tone_samples) : -new_tone_samples]
+            # Analyze Tone A window: [0:new_tone_samples]
+            # (recent_samples already contains the last total_samples)
+            tone_a_window = recent_samples[0:new_tone_samples]
             tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
-            # Analyze Tone B window: last new_tone_samples
-            tone_b_window = buffer_array[-new_tone_samples:]
+            # Analyze Tone B window: [new_tone_samples:]
+            tone_b_window = recent_samples[new_tone_samples:]
             tone_b_freq = freq_from_fft(tone_b_window, SAMPLE_RATE)
 
             # Voice rejection: Check if frequencies match any
@@ -414,27 +440,9 @@ class ChannelToneDetector:
             if abs(tone_a_freq - tone_b_freq) <= 50:
                 return False
 
-            # Voice rejection: Check frequency stability
-            # Analyze multiple windows to ensure frequency is stable
-            stability_check_samples = int(0.1 * SAMPLE_RATE)  # 100ms
-            if len(buffer_array) >= total_samples + stability_check_samples:
-                # Check tone A stability
-                check_window_a = buffer_array[
-                    -(2 * new_tone_samples + stability_check_samples) : -(
-                        2 * new_tone_samples
-                    )
-                ]
-                check_freq_a = freq_from_fft(check_window_a, SAMPLE_RATE)
-                if abs(check_freq_a - tone_a_freq) > self.new_tone_range_hz * 2:
-                    return False  # Frequency not stable
-
-                # Check tone B stability (before tone B starts)
-                check_window_b = buffer_array[
-                    -(new_tone_samples + stability_check_samples) : -new_tone_samples
-                ]
-                check_freq_b = freq_from_fft(check_window_b, SAMPLE_RATE)
-                if abs(check_freq_b - tone_b_freq) > self.new_tone_range_hz * 2:
-                    return False  # Frequency not stable
+            # OPTIMIZATION 4: Removed expensive stability checks (2 extra FFTs)
+            # Instead, rely on 3 consecutive detections (like reference project)
+            # This eliminates 2 expensive FFT operations per detection cycle
 
             # Consistency check: Like reference, require 3 consecutive
             # identical detections
