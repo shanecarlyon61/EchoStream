@@ -656,8 +656,10 @@ class UDPPlayer:
                         pass
 
                 # Process tone detection periodically (expensive FFT operations)
+                # Note: We already added samples above, so we call detector.process_audio() directly
+                # to avoid adding samples twice
                 current_time = time.time()
-                if process_audio_for_channel and (current_time - last_process_time) >= PROCESS_INTERVAL:
+                if (current_time - last_process_time) >= PROCESS_INTERVAL:
                     process_count += 1
                     last_process_time = current_time
                     
@@ -665,16 +667,21 @@ class UDPPlayer:
                         print(f"[TONE DETECT DEBUG] Channel {channel_id}: Processing tone detection (process_count={process_count}, chunks_processed={chunk_count})")
                     
                     try:
-                        detected_tone = process_audio_for_channel(
-                            channel_id, filtered_audio
-                        )
-                        if detected_tone:
-                            print(f"\n[TONE DETECT] *** TONE DETECTED ON {channel_id} ***")
-                            print(
-                                f"[TONE DETECT] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n"
-                            )
+                        # Import detector access from tone_detection module
+                        from tone_detection import _channel_detectors, _detectors_mutex
+                        
+                        with _detectors_mutex:
+                            detector = _channel_detectors.get(channel_id)
+                            if detector:
+                                # Call process_audio() directly without adding samples again
+                                detected_tone = detector.process_audio()
+                                if detected_tone:
+                                    print(f"\n[TONE DETECT] *** TONE DETECTED ON {channel_id} ***")
+                                    print(
+                                        f"[TONE DETECT] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n"
+                                    )
                     except Exception as tone_err:
-                        print(f"[TONE DETECT] ERROR in process_audio_for_channel for {channel_id}: {tone_err}")
+                        print(f"[TONE DETECT] ERROR in tone detection for {channel_id}: {tone_err}")
                         import traceback
                         traceback.print_exc()
 
