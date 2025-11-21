@@ -100,6 +100,86 @@ def calculate_rms_volume(samples: np.ndarray) -> float:
     return 20 * np.log10(rms)
 
 
+def count_significant_peaks(
+    sig: np.ndarray,
+    fs: int = SAMPLE_RATE,
+    peak_threshold: float = 0.3,
+    min_freq: float = 50.0,
+    max_freq: float = 4000.0,
+    min_peak_separation_hz: float = 20.0,
+) -> int:
+    """
+    Count significant frequency peaks in FFT spectrum.
+
+    Used to distinguish human voice (3+ peaks) from pure tones (≤2 peaks).
+
+    Args:
+        sig: Audio signal samples
+        fs: Sample rate (default: 48000)
+        peak_threshold: Minimum magnitude relative to max peak (0.0-1.0)
+                       Default 0.3 = peak must be 30% of max magnitude
+        min_freq: Minimum frequency to consider (Hz) - filters DC and very low
+        max_freq: Maximum frequency to consider (Hz) - filters noise
+        min_peak_separation_hz: Minimum Hz between peaks to count separately
+
+    Returns:
+        Number of significant peaks detected
+        - Pure tone: 1-2 peaks
+        - Voice: 3+ peaks
+    """
+    if len(sig) == 0:
+        return 0
+
+    # Compute FFT (same as freq_from_fft)
+    windowed = sig * hanning(len(sig))
+    f = rfft(windowed)
+    magnitudes = np.abs(f)
+
+    if np.max(magnitudes) == 0:
+        return 0
+
+    # Normalize magnitudes
+    magnitudes_norm = magnitudes / np.max(magnitudes)
+
+    # Convert frequency bins to Hz
+    freqs = np.fft.rfftfreq(len(windowed), 1.0 / fs)
+
+    # Filter by frequency range
+    freq_mask = (freqs >= min_freq) & (freqs <= max_freq)
+    magnitudes_filtered = magnitudes_norm[freq_mask]
+    freqs_filtered = freqs[freq_mask]
+
+    if len(magnitudes_filtered) < 3:
+        return 0
+
+    # Find peaks using simple local maximum detection
+    peaks = []
+    for i in range(1, len(magnitudes_filtered) - 1):
+        # Check if this is a local maximum above threshold
+        if (
+            magnitudes_filtered[i] > magnitudes_filtered[i - 1]
+            and magnitudes_filtered[i] > magnitudes_filtered[i + 1]
+            and magnitudes_filtered[i] >= peak_threshold
+        ):
+            peaks.append((freqs_filtered[i], magnitudes_filtered[i]))
+
+    # Remove peaks that are too close together
+    # Keep only the strongest peak in each cluster
+    if len(peaks) > 1:
+        peaks_sorted = sorted(peaks, key=lambda x: x[1], reverse=True)
+        filtered_peaks = [peaks_sorted[0]]
+
+        for freq, mag in peaks_sorted[1:]:
+            # Check if this peak is far enough from existing peaks
+            min_distance = min(abs(freq - fp[0]) for fp in filtered_peaks)
+            if min_distance > min_peak_separation_hz:
+                filtered_peaks.append((freq, mag))
+
+        return len(filtered_peaks)
+
+    return len(peaks)
+
+
 class ChannelToneDetector:
     def __init__(
         self,
@@ -124,6 +204,8 @@ class ChannelToneDetector:
         self.new_tone_length_ms = new_tone_config.get("new_tone_length_ms", 1000)
         self.new_tone_length_seconds = self.new_tone_length_ms / 1000.0
         self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
+        # Hardcoded to 3 consecutive detections (strikes)
+        self.new_tone_consecutive_required = 3
         self.new_tone_config = new_tone_config
 
         # Passthrough configuration
@@ -232,9 +314,21 @@ class ChannelToneDetector:
             tone_a_window = recent_samples[0:tone_a_samples]
             tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
+            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
+            tone_a_peaks = count_significant_peaks(tone_a_window, SAMPLE_RATE)
+            if tone_a_peaks >= 3:
+                # Voice detected in Tone A window, reject
+                return False
+
             # Analyze Tone B window: [tone_a_samples:]
             tone_b_window = recent_samples[tone_a_samples:]
             tone_b_freq = freq_from_fft(tone_b_window, SAMPLE_RATE)
+
+            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
+            tone_b_peaks = count_significant_peaks(tone_b_window, SAMPLE_RATE)
+            if tone_b_peaks >= 3:
+                # Voice detected in Tone B window, reject
+                return False
 
             # Debug: Log detected frequencies periodically
             if random.randint(1, 50) == 1:
@@ -399,9 +493,21 @@ class ChannelToneDetector:
             tone_a_window = recent_samples[0:new_tone_samples]
             tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
+            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
+            tone_a_peaks = count_significant_peaks(tone_a_window, SAMPLE_RATE)
+            if tone_a_peaks >= 3:
+                # Voice detected in Tone A window, reject
+                return False
+
             # Analyze Tone B window: [new_tone_samples:]
             tone_b_window = recent_samples[new_tone_samples:]
             tone_b_freq = freq_from_fft(tone_b_window, SAMPLE_RATE)
+
+            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
+            tone_b_peaks = count_significant_peaks(tone_b_window, SAMPLE_RATE)
+            if tone_b_peaks >= 3:
+                # Voice detected in Tone B window, reject
+                return False
 
             # Voice rejection: Check if frequencies match any
             # defined tone
@@ -444,7 +550,7 @@ class ChannelToneDetector:
             # Instead, rely on 3 consecutive detections (like reference project)
             # This eliminates 2 expensive FFT operations per detection cycle
 
-            # Consistency check: Like reference, require 3 consecutive
+            # Consistency check: Like reference, require consecutive
             # identical detections
             current_pair = {
                 "tone_a": int(tone_a_freq),
@@ -457,7 +563,7 @@ class ChannelToneDetector:
                 self.new_tone_pair_count = 0
                 self.last_new_tone_pair = current_pair
             elif self.last_new_tone_pair == current_pair:
-                if self.new_tone_pair_count < 3:
+                if self.new_tone_pair_count < self.new_tone_consecutive_required:
                     self.new_tone_pair_count += 1
                     return False  # Not enough consecutive detections yet
             else:
@@ -559,7 +665,8 @@ def init_channel_detector(
                 print(
                     f"[TONE DETECTION] New tone detection enabled: "
                     f"length={new_tone_config.get('new_tone_length_ms', 1000)} ms, "  # noqa: E501
-                    f"range=±{new_tone_config.get('new_tone_range_hz', 3)} Hz"  # noqa: E501
+                    f"range=±{new_tone_config.get('new_tone_range_hz', 3)} Hz, "  # noqa: E501
+                    f"strikes=3"  # noqa: E501
                 )
             if passthrough_config and passthrough_config.get("tone_passthrough", False):
                 print(
