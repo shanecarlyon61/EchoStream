@@ -786,8 +786,7 @@ class UDPPlayer:
                                         # Generate random IV (12 bytes for GCM)
                                         iv = os.urandom(12)
                                         aesgcm_enc = AESGCM(self._aes_key)
-                                        encrypted = aesgcm_enc.encrypt(
-                                            iv, opus_data, None)
+                                        encrypted = aesgcm_enc.encrypt(iv, opus_data, None)
 
                                         # Combine IV + ciphertext + tag
                                         encrypted_with_iv = iv + encrypted
@@ -803,8 +802,7 @@ class UDPPlayer:
                                                 "type": "audio",
                                                 "data": b64_data
                                             })
-                                            self._sock.sendto(
-                                                msg.encode('utf-8'), self._server_addr)  # nosec
+                                            self._sock.sendto(msg.encode('utf-8'), self._server_addr)  # nosec
 
                                             send_count += 1
                                             if send_count <= 5 or send_count % 500 == 0:
@@ -818,16 +816,13 @@ class UDPPlayer:
                                                     f"addr={self._server_addr}")
                                     except Exception as e:
                                         if send_count <= 10:
-                                            print(
-                                                f"[AUDIO TX ERROR] Channel {channel_id}: Encryption/send failed: {e}")
+                                            print(f"[AUDIO TX ERROR] Channel {channel_id}: Encryption/send failed: {e}")
                                 else:
                                     if send_count <= 10:
-                                        print(
-                                            f"[AUDIO TX ERROR] Channel {channel_id}: No AES key available")
+                                        print(f"[AUDIO TX ERROR] Channel {channel_id}: No AES key available")
                         except Exception as e:
                             if send_count <= 10:
-                                print(
-                                    f"[AUDIO TX ERROR] Channel {channel_id}: Opus encode failed: {e}")
+                                print(f"[AUDIO TX ERROR] Channel {channel_id}: Opus encode failed: {e}")
 
                         # ================================================
                         # AFTER UDP send: Handle secondary operations
