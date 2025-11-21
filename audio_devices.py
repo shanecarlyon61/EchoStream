@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Tuple
 
 try:
     import pyaudio
+
     HAS_PYAUDIO = True
 except Exception:
     pyaudio = None
@@ -34,11 +35,13 @@ def list_output_devices() -> List[Dict[str, str]]:
         for i in range(count):
             info = pa.get_device_info_by_index(i)
             if int(info.get("maxOutputChannels", 0)) > 0:
-                results.append({
-                    "index": str(i),
-                    "name": str(info.get("name", "")),
-                    "host_api": str(info.get("hostApi", "")),
-                })
+                results.append(
+                    {
+                        "index": str(i),
+                        "name": str(info.get("name", "")),
+                        "host_api": str(info.get("hostApi", "")),
+                    }
+                )
     except Exception as e:
         print(f"[AUDIO] ERROR: Failed to enumerate devices: {e}")
     return results
@@ -77,23 +80,29 @@ def select_output_device_for_channel(channel_index: int) -> Optional[int]:
         return None
 
 
-def open_output_stream(device_index: int,
-                       sample_rate: int = 48000,
-                       num_channels: int = 1,
-                       frames_per_buffer: int = 1024):
+def open_output_stream(
+    device_index: int,
+    sample_rate: int = 48000,
+    num_channels: int = 1,
+    frames_per_buffer: int = 1024,
+):
     pa = _get_pa()
     if pa is None:
         return None, None
     try:
-        stream = pa.open(format=pyaudio.paInt16,  # 16-bit PCM
-                         channels=num_channels,
-                         rate=sample_rate,
-                         output=True,
-                         output_device_index=device_index,
-                         frames_per_buffer=frames_per_buffer)
+        stream = pa.open(
+            format=pyaudio.paInt16,  # 16-bit PCM
+            channels=num_channels,
+            rate=sample_rate,
+            output=True,
+            output_device_index=device_index,
+            frames_per_buffer=frames_per_buffer,
+        )
         return pa, stream
     except Exception as e:
-        print(f"[AUDIO] ERROR: Failed to open output stream on device {device_index}: {e}")
+        print(
+            f"[AUDIO] ERROR: Failed to open output stream on device {device_index}: {e}"
+        )
         return None, None
 
 
@@ -107,11 +116,13 @@ def list_input_devices() -> List[Dict[str, str]]:
         for i in range(count):
             info = pa.get_device_info_by_index(i)
             if int(info.get("maxInputChannels", 0)) > 0:
-                results.append({
-                    "index": str(i),
-                    "name": str(info.get("name", "")),
-                    "host_api": str(info.get("hostApi", "")),
-                })
+                results.append(
+                    {
+                        "index": str(i),
+                        "name": str(info.get("name", "")),
+                        "host_api": str(info.get("hostApi", "")),
+                    }
+                )
     except Exception as e:
         print(f"[AUDIO] ERROR: Failed to enumerate input devices: {e}")
     return results
@@ -153,23 +164,29 @@ def select_input_device_for_channel(channel_index: int) -> Optional[int]:
         return None
 
 
-def open_input_stream(device_index: int,
-                      sample_rate: int = 48000,
-                      num_channels: int = 1,
-                      frames_per_buffer: int = 1024):
+def open_input_stream(
+    device_index: int,
+    sample_rate: int = 48000,
+    num_channels: int = 1,
+    frames_per_buffer: int = 1024,
+):
     pa = _get_pa()
     if pa is None:
         return None, None
     try:
-        stream = pa.open(format=pyaudio.paFloat32,  # 32-bit float like C code
-                         channels=num_channels,
-                         rate=sample_rate,
-                         input=True,
-                         input_device_index=device_index,
-                         frames_per_buffer=frames_per_buffer)
+        stream = pa.open(
+            format=pyaudio.paFloat32,  # 32-bit float like C code
+            channels=num_channels,
+            rate=sample_rate,
+            input=True,
+            input_device_index=device_index,
+            frames_per_buffer=frames_per_buffer,
+        )
         return pa, stream
     except Exception as e:
-        print(f"[AUDIO] ERROR: Failed to open input stream on device {device_index}: {e}")
+        print(
+            f"[AUDIO] ERROR: Failed to open input stream on device {device_index}: {e}"
+        )
         return None, None
 
 
@@ -185,5 +202,3 @@ def close_stream(pa: "pyaudio.PyAudio", stream) -> None:
         pass
     except Exception:
         pass
-
-

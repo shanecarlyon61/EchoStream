@@ -3,6 +3,7 @@ from typing import Dict, Optional, Callable
 
 try:
     import lgpio
+
     HAS_LGPIO = True
 except Exception:
     HAS_LGPIO = False
@@ -40,11 +41,17 @@ def init_gpio(chip: int = 0) -> bool:
 
         for gpio_num, pin_num in GPIO_PINS.items():
             if not init_gpio_pin(gpio_num):
-                print(f"[GPIO] WARNING: Failed to initialize GPIO {gpio_num} (pin {pin_num})")
+                print(
+                    f"[GPIO] WARNING: Failed to initialize GPIO {gpio_num} (pin {pin_num})"
+                )
             else:
                 state = read_pin(gpio_num)
                 gpio_states[gpio_num] = state
-                status = "ACTIVE" if state == 0 else ("INACTIVE" if state == 1 else "UNKNOWN")
+                status = (
+                    "ACTIVE"
+                    if state == 0
+                    else ("INACTIVE" if state == 1 else "UNKNOWN")
+                )
                 print(f"[GPIO] PIN {pin_num} (GPIO {gpio_num}) initial state: {status}")
 
         return True
@@ -97,8 +104,11 @@ def cleanup_gpio():
     gpio_states.clear()
 
 
-def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100,
-                 on_change: Optional[Callable[[int, int], None]] = None):
+def monitor_gpio(
+    poll_interval: float = 0.1,
+    status_every: int = 100,
+    on_change: Optional[Callable[[int, int], None]] = None,
+):
     if gpio_chip is None:
         print("[GPIO] ERROR: GPIO not initialized")
         return
@@ -122,14 +132,20 @@ def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100,
                         try:
                             on_change(gpio_num, val)
                         except Exception as e:
-                            print(f"[GPIO] WARNING: on_change callback error for GPIO {gpio_num}: {e}")
+                            print(
+                                f"[GPIO] WARNING: on_change callback error for GPIO {gpio_num}: {e}"
+                            )
 
             count += 1
             if count >= status_every:
                 print("\n=== GPIO Status Report ===")
                 for gpio_num, pin_num in GPIO_PINS.items():
                     val = gpio_states.get(gpio_num, -1)
-                    status = "ACTIVE" if val == 0 else ("INACTIVE" if val == 1 else "UNKNOWN")
+                    status = (
+                        "ACTIVE"
+                        if val == 0
+                        else ("INACTIVE" if val == 1 else "UNKNOWN")
+                    )
                     print(f"PIN {pin_num} (GPIO {gpio_num}): {status}")
                 print("=" * 30 + "\n")
                 count = 0
@@ -139,5 +155,3 @@ def monitor_gpio(poll_interval: float = 0.1, status_every: int = 100,
         pass
     except Exception as e:
         print(f"[GPIO] ERROR: Exception in monitor loop: {e}")
-
-

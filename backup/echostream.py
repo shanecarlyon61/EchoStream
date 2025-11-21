@@ -1,6 +1,7 @@
 """
 EchoStream - Common definitions and constants
 """
+
 import threading
 
 # Constants

@@ -16,10 +16,8 @@ except ImportError:
     from numpy import hanning
 
 try:
-    from mqtt_client import (
-        publish_known_tone_detection,
-        publish_new_tone_pair
-    )
+    from mqtt_client import publish_known_tone_detection, publish_new_tone_pair
+
     MQTT_AVAILABLE = True
 except ImportError:
     MQTT_AVAILABLE = False
@@ -46,9 +44,8 @@ def parabolic(f, x):
     if x == 0 or x == len(f) - 1:
         return float(x), float(f[x])
     try:
-        xv = (1 / 2. * (f[x - 1] - f[x + 1]) /
-              (f[x - 1] - 2 * f[x] + f[x + 1]) + x)
-        yv = f[x] - 1 / 4. * (f[x - 1] - f[x + 1]) * (xv - x)
+        xv = 1 / 2.0 * (f[x - 1] - f[x + 1]) / (f[x - 1] - 2 * f[x] + f[x + 1]) + x
+        yv = f[x] - 1 / 4.0 * (f[x - 1] - f[x + 1]) * (xv - x)
         return xv, yv
     except (ZeroDivisionError, IndexError):
         return float(x), float(f[x])
@@ -85,8 +82,9 @@ def freq_from_fft(sig: np.ndarray, fs: int = SAMPLE_RATE) -> float:
     return fs * true_i / len(windowed)
 
 
-def is_frequency_in_range(detected_freq: float, target_freq: float,
-                          range_hz: int) -> bool:
+def is_frequency_in_range(
+    detected_freq: float, target_freq: float, range_hz: int
+) -> bool:
     """Check if detected frequency is within tolerance of target
     frequency."""
     return abs(detected_freq - target_freq) <= range_hz
@@ -96,7 +94,7 @@ def calculate_rms_volume(samples: np.ndarray) -> float:
     """Calculate RMS volume in dB."""
     if len(samples) == 0:
         return -np.inf
-    rms = np.sqrt(np.mean(samples ** 2))
+    rms = np.sqrt(np.mean(samples**2))
     if rms == 0:
         return -np.inf
     return 20 * np.log10(rms)
@@ -108,7 +106,7 @@ class ChannelToneDetector:
         channel_id: str,
         tone_definitions: List[Dict[str, Any]],
         new_tone_config: Optional[Dict[str, Any]] = None,
-        passthrough_config: Optional[Dict[str, Any]] = None
+        passthrough_config: Optional[Dict[str, Any]] = None,
     ):
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
@@ -120,22 +118,17 @@ class ChannelToneDetector:
             new_tone_config = {
                 "detect_new_tones": False,
                 "new_tone_length_ms": 1000,
-                "new_tone_range_hz": 3
+                "new_tone_range_hz": 3,
             }
-        self.detect_new_tones = new_tone_config.get(
-            "detect_new_tones", False)
-        self.new_tone_length_ms = new_tone_config.get(
-            "new_tone_length_ms", 1000)
+        self.detect_new_tones = new_tone_config.get("detect_new_tones", False)
+        self.new_tone_length_ms = new_tone_config.get("new_tone_length_ms", 1000)
         self.new_tone_length_seconds = self.new_tone_length_ms / 1000.0
         self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
         self.new_tone_config = new_tone_config
 
         # Passthrough configuration
         if passthrough_config is None:
-            passthrough_config = {
-                "tone_passthrough": False,
-                "passthrough_channel": ""
-            }
+            passthrough_config = {"tone_passthrough": False, "passthrough_channel": ""}
         self.passthrough_config = passthrough_config
 
         # Tracking state for defined tones
@@ -167,12 +160,10 @@ class ChannelToneDetector:
                 # Large arrays: convert in chunks to avoid blocking
                 chunk_size = 5000
                 for i in range(0, len(samples), chunk_size):
-                    chunk = samples[i:i + chunk_size]
+                    chunk = samples[i : i + chunk_size]
                     self.audio_buffer.extend(chunk.tolist())
             if len(self.audio_buffer) > MAX_BUFFER_SAMPLES:
-                self.audio_buffer = (
-                    self.audio_buffer[-MAX_BUFFER_SAMPLES:]
-                )
+                self.audio_buffer = self.audio_buffer[-MAX_BUFFER_SAMPLES:]
 
     def _get_buffer_array(self) -> np.ndarray:
         """Get current audio buffer as numpy array."""
@@ -212,9 +203,7 @@ class ChannelToneDetector:
         # Check minimum time since last detection (avoid duplicates)
         tone_id = tone_def["tone_id"]
         current_time = time.time()
-        time_since_last = (
-            current_time - self.last_detection_time.get(tone_id, 0)
-        )
+        time_since_last = current_time - self.last_detection_time.get(tone_id, 0)
         if time_since_last < MIN_DETECTION_INTERVAL_SECONDS:
             return False
 
@@ -227,9 +216,7 @@ class ChannelToneDetector:
         try:
             # Analyze Tone A window:
             # [-(total_samples):-tone_b_samples]
-            tone_a_window = buffer_array[
-                -(total_samples):-tone_b_samples
-            ]
+            tone_a_window = buffer_array[-(total_samples):-tone_b_samples]
             tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
             # Analyze Tone B window: last tone_b_samples
@@ -238,12 +225,10 @@ class ChannelToneDetector:
 
             # Check if frequencies match defined tone
             tone_a_match = is_frequency_in_range(
-                tone_a_freq, tone_def["tone_a"],
-                tone_def.get("tone_a_range", 10)
+                tone_a_freq, tone_def["tone_a"], tone_def.get("tone_a_range", 10)
             )
             tone_b_match = is_frequency_in_range(
-                tone_b_freq, tone_def["tone_b"],
-                tone_def.get("tone_b_range", 10)
+                tone_b_freq, tone_def["tone_b"], tone_def.get("tone_b_range", 10)
             )
 
             if tone_a_match and tone_b_match:
@@ -251,36 +236,36 @@ class ChannelToneDetector:
                 self.last_detection_time[tone_id] = current_time
 
                 confirmation_log = (
-                    "\n" + "=" * 80 + "\n" +
-                    " " * 20 +
-                    "*** DEFINED TONE SEQUENCE DETECTED! ***\n" +
-                    "=" * 80 + "\n" +
-                    f"  Channel ID:     {self.channel_id}\n" +
-                    f"  Tone ID:        {tone_def['tone_id']}\n" +
-                    "  \n" +
-                    "  Tone A Details:\n" +
-                    f"    Detected:     {tone_a_freq:.1f} Hz\n" +
-                    f"    Target:       {tone_def['tone_a']:.1f} Hz "
-                    f"±{tone_def.get('tone_a_range', 10)} Hz\n" +
-                    f"    Duration:     "
+                    "\n"
+                    + "=" * 80
+                    + "\n"
+                    + " " * 20
+                    + "*** DEFINED TONE SEQUENCE DETECTED! ***\n"
+                    + "=" * 80
+                    + "\n"
+                    + f"  Channel ID:     {self.channel_id}\n"
+                    + f"  Tone ID:        {tone_def['tone_id']}\n"
+                    + "  \n"
+                    + "  Tone A Details:\n"
+                    + f"    Detected:     {tone_a_freq:.1f} Hz\n"
+                    + f"    Target:       {tone_def['tone_a']:.1f} Hz "
+                    f"±{tone_def.get('tone_a_range', 10)} Hz\n" + f"    Duration:     "
                     f"{tone_a_length_seconds:.2f} s "
-                    f"({tone_def['tone_a_length_ms']} ms)\n" +
-                    "  \n" +
-                    "  Tone B Details:\n" +
-                    f"    Detected:     {tone_b_freq:.1f} Hz\n" +
-                    f"    Target:       {tone_def['tone_b']:.1f} Hz "
-                    f"±{tone_def.get('tone_b_range', 10)} Hz\n" +
-                    f"    Duration:     "
+                    f"({tone_def['tone_a_length_ms']} ms)\n"
+                    + "  \n"
+                    + "  Tone B Details:\n"
+                    + f"    Detected:     {tone_b_freq:.1f} Hz\n"
+                    + f"    Target:       {tone_def['tone_b']:.1f} Hz "
+                    f"±{tone_def.get('tone_b_range', 10)} Hz\n" + f"    Duration:     "
                     f"{tone_b_length_seconds:.2f} s "
-                    f"({tone_def['tone_b_length_ms']} ms)\n" +
-                    "  \n" +
-                    "  Record Length:  "
+                    f"({tone_def['tone_b_length_ms']} ms)\n"
+                    + "  \n"
+                    + "  Record Length:  "
                     f"{tone_def.get('record_length_ms', 0)} ms\n"
                 )
                 if tone_def.get("detection_tone_alert"):
                     confirmation_log += (
-                        f"  Alert Type:     "
-                        f"{tone_def['detection_tone_alert']}\n"
+                        f"  Alert Type:     " f"{tone_def['detection_tone_alert']}\n"
                     )
                 confirmation_log += "=" * 80 + "\n"
                 print(confirmation_log, flush=True)
@@ -296,29 +281,22 @@ class ChannelToneDetector:
                         tone_a_range_hz=tone_def.get("tone_a_range", 10),
                         tone_b_range_hz=tone_def.get("tone_b_range", 10),
                         channel_id=self.channel_id,
-                        record_length_ms=tone_def.get(
-                            "record_length_ms", 0),
-                        detection_tone_alert=tone_def.get(
-                            "detection_tone_alert")
+                        record_length_ms=tone_def.get("record_length_ms", 0),
+                        detection_tone_alert=tone_def.get("detection_tone_alert"),
                     )
 
                 # Trigger passthrough if configured
                 try:
                     from passthrough import global_passthrough_manager
-                    if self.passthrough_config.get(
-                        "tone_passthrough", False
-                    ):
-                        target_channel = (
-                            self.passthrough_config.get(
-                                "passthrough_channel", ""
-                            )
+
+                    if self.passthrough_config.get("tone_passthrough", False):
+                        target_channel = self.passthrough_config.get(
+                            "passthrough_channel", ""
                         )
-                        record_length_ms = tone_def.get(
-                            "record_length_ms", 0)
+                        record_length_ms = tone_def.get("record_length_ms", 0)
                         if target_channel and record_length_ms > 0:
                             global_passthrough_manager.start_passthrough(
-                                self.channel_id, target_channel,
-                                record_length_ms
+                                self.channel_id, target_channel, record_length_ms
                             )
                             print(
                                 f"[PASSTHROUGH] Triggered: "
@@ -327,33 +305,31 @@ class ChannelToneDetector:
                             )
                 except Exception as e:
                     print(
-                        f"[PASSTHROUGH] ERROR: Failed to trigger "
-                        f"passthrough: {e}"
+                        f"[PASSTHROUGH] ERROR: Failed to trigger " f"passthrough: {e}"
                     )
 
                 # Trigger recording
                 try:
                     from recording import global_recording_manager
+
                     record_length_ms = tone_def.get("record_length_ms", 0)
                     if record_length_ms > 0:
                         global_recording_manager.start_recording(
-                            self.channel_id, "defined",
-                            tone_def["tone_a"], tone_def["tone_b"],
-                            record_length_ms
+                            self.channel_id,
+                            "defined",
+                            tone_def["tone_a"],
+                            tone_def["tone_b"],
+                            record_length_ms,
                         )
                 except Exception as e:
-                    print(
-                        f"[RECORDING] ERROR: Failed to start "
-                        f"recording: {e}"
-                    )
+                    print(f"[RECORDING] ERROR: Failed to start " f"recording: {e}")
 
                 return True
 
         except Exception as e:
-            print(
-                f"[TONE DETECTION] ERROR in defined tone detection: {e}"
-            )
+            print(f"[TONE DETECTION] ERROR in defined tone detection: {e}")
             import traceback
+
             traceback.print_exc()
 
         return False
@@ -372,9 +348,7 @@ class ChannelToneDetector:
         buffer_array = self._get_buffer_array()
 
         # Calculate required samples for new tone length
-        new_tone_samples = int(
-            self.new_tone_length_seconds * SAMPLE_RATE
-        )
+        new_tone_samples = int(self.new_tone_length_seconds * SAMPLE_RATE)
         total_samples = 2 * new_tone_samples  # Need 2 tones worth
 
         # Need at least total_samples in buffer
@@ -383,9 +357,7 @@ class ChannelToneDetector:
 
         # Check minimum time since last detection
         current_time = time.time()
-        time_since_last = (
-            current_time - self.last_new_tone_detection_time
-        )
+        time_since_last = current_time - self.last_new_tone_detection_time
         if time_since_last < MIN_DETECTION_INTERVAL_SECONDS:
             return False
 
@@ -398,9 +370,7 @@ class ChannelToneDetector:
         try:
             # Analyze Tone A window:
             # [-(2*new_tone_samples):-new_tone_samples]
-            tone_a_window = buffer_array[
-                -(2 * new_tone_samples):-new_tone_samples
-            ]
+            tone_a_window = buffer_array[-(2 * new_tone_samples) : -new_tone_samples]
             tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
             # Analyze Tone B window: last new_tone_samples
@@ -411,18 +381,28 @@ class ChannelToneDetector:
             # defined tone
             is_known_tone = False
             for tone_def in self.tone_definitions:
-                if (is_frequency_in_range(
-                        tone_a_freq, tone_def["tone_a"],
-                        tone_def.get("tone_a_range", 10)) or
+                if (
                     is_frequency_in_range(
-                        tone_a_freq, tone_def["tone_b"],
-                        tone_def.get("tone_b_range", 10)) or
-                    is_frequency_in_range(
-                        tone_b_freq, tone_def["tone_a"],
-                        tone_def.get("tone_a_range", 10)) or
-                    is_frequency_in_range(
-                        tone_b_freq, tone_def["tone_b"],
-                        tone_def.get("tone_b_range", 10))):
+                        tone_a_freq,
+                        tone_def["tone_a"],
+                        tone_def.get("tone_a_range", 10),
+                    )
+                    or is_frequency_in_range(
+                        tone_a_freq,
+                        tone_def["tone_b"],
+                        tone_def.get("tone_b_range", 10),
+                    )
+                    or is_frequency_in_range(
+                        tone_b_freq,
+                        tone_def["tone_a"],
+                        tone_def.get("tone_a_range", 10),
+                    )
+                    or is_frequency_in_range(
+                        tone_b_freq,
+                        tone_def["tone_b"],
+                        tone_def.get("tone_b_range", 10),
+                    )
+                ):
                     is_known_tone = True
                     break
 
@@ -437,39 +417,32 @@ class ChannelToneDetector:
             # Voice rejection: Check frequency stability
             # Analyze multiple windows to ensure frequency is stable
             stability_check_samples = int(0.1 * SAMPLE_RATE)  # 100ms
-            if len(buffer_array) >= total_samples + \
-                    stability_check_samples:
+            if len(buffer_array) >= total_samples + stability_check_samples:
                 # Check tone A stability
                 check_window_a = buffer_array[
-                    -(2 * new_tone_samples + stability_check_samples):
-                    -(2 * new_tone_samples)
+                    -(2 * new_tone_samples + stability_check_samples) : -(
+                        2 * new_tone_samples
+                    )
                 ]
-                check_freq_a = freq_from_fft(
-                    check_window_a, SAMPLE_RATE
-                )
-                if abs(check_freq_a - tone_a_freq) > \
-                        self.new_tone_range_hz * 2:
+                check_freq_a = freq_from_fft(check_window_a, SAMPLE_RATE)
+                if abs(check_freq_a - tone_a_freq) > self.new_tone_range_hz * 2:
                     return False  # Frequency not stable
 
                 # Check tone B stability (before tone B starts)
                 check_window_b = buffer_array[
-                    -(new_tone_samples + stability_check_samples):
-                    -new_tone_samples
+                    -(new_tone_samples + stability_check_samples) : -new_tone_samples
                 ]
-                check_freq_b = freq_from_fft(
-                    check_window_b, SAMPLE_RATE
-                )
-                if abs(check_freq_b - tone_b_freq) > \
-                        self.new_tone_range_hz * 2:
+                check_freq_b = freq_from_fft(check_window_b, SAMPLE_RATE)
+                if abs(check_freq_b - tone_b_freq) > self.new_tone_range_hz * 2:
                     return False  # Frequency not stable
 
             # Consistency check: Like reference, require 3 consecutive
             # identical detections
             current_pair = {
-                'tone_a': int(tone_a_freq),
-                'tone_b': int(tone_b_freq),
-                'tone_a_length': self.new_tone_length_seconds,
-                'tone_b_length': self.new_tone_length_seconds
+                "tone_a": int(tone_a_freq),
+                "tone_b": int(tone_b_freq),
+                "tone_a_length": self.new_tone_length_seconds,
+                "tone_b_length": self.new_tone_length_seconds,
             }
 
             if self.last_new_tone_pair is None:
@@ -504,27 +477,25 @@ class ChannelToneDetector:
             # Trigger recording
             try:
                 from recording import global_recording_manager
-                new_tone_length_ms = self.new_tone_config.get(
-                    "new_tone_length_ms", 0
-                )
+
+                new_tone_length_ms = self.new_tone_config.get("new_tone_length_ms", 0)
                 if new_tone_length_ms > 0:
                     global_recording_manager.start_recording(
-                        self.channel_id, "new", tone_a_freq,
-                        tone_b_freq, new_tone_length_ms
+                        self.channel_id,
+                        "new",
+                        tone_a_freq,
+                        tone_b_freq,
+                        new_tone_length_ms,
                     )
             except Exception as e:
-                print(
-                    f"[RECORDING] ERROR: Failed to start new tone "
-                    f"recording: {e}"
-                )
+                print(f"[RECORDING] ERROR: Failed to start new tone " f"recording: {e}")
 
             return True
 
         except Exception as e:
-            print(
-                f"[TONE DETECTION] ERROR in new tone detection: {e}"
-            )
+            print(f"[TONE DETECTION] ERROR in new tone detection: {e}")
             import traceback
+
             traceback.print_exc()
 
         return False
@@ -561,41 +532,35 @@ def init_channel_detector(
     channel_id: str,
     tone_definitions: List[Dict[str, Any]],
     new_tone_config: Optional[Dict[str, Any]] = None,
-    passthrough_config: Optional[Dict[str, Any]] = None
+    passthrough_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Initialize tone detector for a channel."""
     with _detectors_mutex:
         if tone_definitions or (
-            new_tone_config and
-            new_tone_config.get("detect_new_tones", False)
+            new_tone_config and new_tone_config.get("detect_new_tones", False)
         ):
             _channel_detectors[channel_id] = ChannelToneDetector(
-                channel_id, tone_definitions, new_tone_config,
-                passthrough_config
+                channel_id, tone_definitions, new_tone_config, passthrough_config
             )
             print(
                 f"[TONE DETECTION] Initialized detector for channel "
                 f"{channel_id} with {len(tone_definitions)} tone "
                 f"definition(s)"
             )
-            if (new_tone_config and
-                    new_tone_config.get("detect_new_tones", False)):
+            if new_tone_config and new_tone_config.get("detect_new_tones", False):
                 print(
                     f"[TONE DETECTION] New tone detection enabled: "
                     f"length={new_tone_config.get('new_tone_length_ms', 1000)} ms, "  # noqa: E501
                     f"range=±{new_tone_config.get('new_tone_range_hz', 3)} Hz"  # noqa: E501
                 )
-            if (passthrough_config and
-                    passthrough_config.get("tone_passthrough", False)):
+            if passthrough_config and passthrough_config.get("tone_passthrough", False):
                 print(
                     f"[TONE DETECTION] Passthrough enabled: "
                     f"target={passthrough_config.get('passthrough_channel', 'N/A')}"  # noqa: E501
                 )
             for i, tone_def in enumerate(tone_definitions, 1):
                 print(f"[TONE DETECTION]   Definition {i}:")
-                print(
-                    f"    Tone ID: {tone_def.get('tone_id', 'N/A')}"
-                )
+                print(f"    Tone ID: {tone_def.get('tone_id', 'N/A')}")
                 print(
                     f"    Tone A: {tone_def.get('tone_a', 0):.1f} Hz "
                     f"±{tone_def.get('tone_a_range', 10)} Hz "
@@ -607,8 +572,7 @@ def init_channel_detector(
                     f"({tone_def.get('tone_b_length_ms', 0)} ms)"
                 )
                 print(
-                    f"    Record Length: "
-                    f"{tone_def.get('record_length_ms', 0)} ms"
+                    f"    Record Length: " f"{tone_def.get('record_length_ms', 0)} ms"
                 )
         else:
             _channel_detectors.pop(channel_id, None)
@@ -618,10 +582,7 @@ def init_channel_detector(
             )
 
 
-def add_audio_samples_for_channel(
-    channel_id: str,
-    filtered_audio: np.ndarray
-) -> None:
+def add_audio_samples_for_channel(channel_id: str, filtered_audio: np.ndarray) -> None:
     """
     Add filtered audio samples to the buffer without processing.
     This is used to keep the buffer updated when processing is
@@ -639,8 +600,7 @@ def add_audio_samples_for_channel(
 
 
 def process_audio_for_channel(
-    channel_id: str,
-    filtered_audio: np.ndarray
+    channel_id: str, filtered_audio: np.ndarray
 ) -> Optional[Dict[str, Any]]:
     """
     Process filtered audio for tone detection (both defined and new

@@ -19,9 +19,9 @@ def get_channel_ids(cfg: Dict[str, Any]) -> List[str]:
     try:
         sw_cfg_list = (
             cfg.get("shadow", {})
-               .get("state", {})
-               .get("desired", {})
-               .get("software_configuration", [])
+            .get("state", {})
+            .get("desired", {})
+            .get("software_configuration", [])
         )
         if not sw_cfg_list:
             return result
@@ -41,9 +41,9 @@ def get_tone_detect_config(cfg: Dict[str, Any]) -> List[Tuple[str, bool]]:
     try:
         sw_cfg_list = (
             cfg.get("shadow", {})
-               .get("state", {})
-               .get("desired", {})
-               .get("software_configuration", [])
+            .get("state", {})
+            .get("desired", {})
+            .get("software_configuration", [])
         )
         if not sw_cfg_list:
             return out
@@ -65,9 +65,9 @@ def get_frequency_filters(cfg: Dict[str, Any], channel_id: str) -> List[Dict[str
     try:
         sw_cfg_list = (
             cfg.get("shadow", {})
-               .get("state", {})
-               .get("desired", {})
-               .get("software_configuration", [])
+            .get("state", {})
+            .get("desired", {})
+            .get("software_configuration", [])
         )
         if not sw_cfg_list:
             return filters
@@ -100,9 +100,9 @@ def get_tone_definitions(cfg: Dict[str, Any], channel_id: str) -> List[Dict[str,
     try:
         sw_cfg_list = (
             cfg.get("shadow", {})
-               .get("state", {})
-               .get("desired", {})
-               .get("software_configuration", [])
+            .get("state", {})
+            .get("desired", {})
+            .get("software_configuration", [])
         )
         if not sw_cfg_list:
             return tone_defs
@@ -115,8 +115,10 @@ def get_tone_definitions(cfg: Dict[str, Any], channel_id: str) -> List[Dict[str,
             tone_detect_config = ch.get("tone_detect_configuration", {})
             alert_tones = tone_detect_config.get("alert_tones", [])
             if not alert_tones:
-                print(f"[CONFIG] DEBUG: No 'alert_tones' found for channel {channel_id}. "
-                      f"Keys in tone_detect_config: {list(tone_detect_config.keys())}")
+                print(
+                    f"[CONFIG] DEBUG: No 'alert_tones' found for channel {channel_id}. "
+                    f"Keys in tone_detect_config: {list(tone_detect_config.keys())}"
+                )
             for tone_obj in alert_tones:
                 tone_data = {
                     "tone_id": str(tone_obj.get("tone_id", "")),
@@ -127,29 +129,40 @@ def get_tone_definitions(cfg: Dict[str, Any], channel_id: str) -> List[Dict[str,
                     "tone_a_range": int(tone_obj.get("tone_a_range", 0)),
                     "tone_b_range": int(tone_obj.get("tone_b_range", 0)),
                     "record_length_ms": int(tone_obj.get("record_length", 0.0) * 1000),
-                    "detection_tone_alert": str(tone_obj.get("detection_tone_alert", "")),
+                    "detection_tone_alert": str(
+                        tone_obj.get("detection_tone_alert", "")
+                    ),
                 }
-                if (tone_data["tone_id"] and 
-                    tone_data["tone_a"] > 0 and 
-                    tone_data["tone_b"] > 0):
+                if (
+                    tone_data["tone_id"]
+                    and tone_data["tone_a"] > 0
+                    and tone_data["tone_b"] > 0
+                ):
                     tone_defs.append(tone_data)
-                    print(f"[CONFIG] Loaded tone definition: ID={tone_data['tone_id']}, "
-                          f"A={tone_data['tone_a']:.1f} Hz±{tone_data['tone_a_range']} "
-                          f"({tone_data['tone_a_length_ms']}ms), "
-                          f"B={tone_data['tone_b']:.1f} Hz±{tone_data['tone_b_range']} "
-                          f"({tone_data['tone_b_length_ms']}ms), "
-                          f"rec={tone_data['record_length_ms']}ms")
+                    print(
+                        f"[CONFIG] Loaded tone definition: ID={tone_data['tone_id']}, "
+                        f"A={tone_data['tone_a']:.1f} Hz±{tone_data['tone_a_range']} "
+                        f"({tone_data['tone_a_length_ms']}ms), "
+                        f"B={tone_data['tone_b']:.1f} Hz±{tone_data['tone_b_range']} "
+                        f"({tone_data['tone_b_length_ms']}ms), "
+                        f"rec={tone_data['record_length_ms']}ms"
+                    )
                 else:
-                    print(f"[CONFIG] WARNING: Skipped invalid tone definition: "
-                          f"tone_id='{tone_data['tone_id']}', "
-                          f"tone_a={tone_data['tone_a']}, tone_b={tone_data['tone_b']}")
+                    print(
+                        f"[CONFIG] WARNING: Skipped invalid tone definition: "
+                        f"tone_id='{tone_data['tone_id']}', "
+                        f"tone_a={tone_data['tone_a']}, tone_b={tone_data['tone_b']}"
+                    )
             break
     except Exception as e:
         print(f"[CONFIG] ERROR: Failed to get tone definitions for {channel_id}: {e}")
         import traceback
+
         traceback.print_exc()
     if not tone_defs:
-        print(f"[CONFIG] WARNING: No valid tone definitions found for channel {channel_id}")
+        print(
+            f"[CONFIG] WARNING: No valid tone definitions found for channel {channel_id}"
+        )
     return tone_defs
 
 
@@ -157,14 +170,14 @@ def get_new_tone_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
     result = {
         "detect_new_tones": False,
         "new_tone_length_ms": 1000,
-        "new_tone_range_hz": 3
+        "new_tone_range_hz": 3,
     }
     try:
         sw_cfg_list = (
             cfg.get("shadow", {})
-               .get("state", {})
-               .get("desired", {})
-               .get("software_configuration", [])
+            .get("state", {})
+            .get("desired", {})
+            .get("software_configuration", [])
         )
         if not sw_cfg_list:
             return result
@@ -177,9 +190,15 @@ def get_new_tone_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
             tone_detect_config = ch.get("tone_detect_configuration", {})
             alert_details = tone_detect_config.get("alert_details", {})
             if alert_details:
-                result["detect_new_tones"] = bool(alert_details.get("detect_new_tones", False))
-                result["new_tone_length_ms"] = int(alert_details.get("new_tone_length", 1000))
-                result["new_tone_range_hz"] = int(alert_details.get("new_tone_range", 3))
+                result["detect_new_tones"] = bool(
+                    alert_details.get("detect_new_tones", False)
+                )
+                result["new_tone_length_ms"] = int(
+                    alert_details.get("new_tone_length", 1000)
+                )
+                result["new_tone_range_hz"] = int(
+                    alert_details.get("new_tone_range", 3)
+                )
             break
     except Exception as e:
         print(f"[CONFIG] ERROR: Failed to get new tone config for {channel_id}: {e}")
@@ -187,16 +206,13 @@ def get_new_tone_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
 
 
 def get_passthrough_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
-    result = {
-        "tone_passthrough": False,
-        "passthrough_channel": ""
-    }
+    result = {"tone_passthrough": False, "passthrough_channel": ""}
     try:
         sw_cfg_list = (
             cfg.get("shadow", {})
-               .get("state", {})
-               .get("desired", {})
-               .get("software_configuration", [])
+            .get("state", {})
+            .get("desired", {})
+            .get("software_configuration", [])
         )
         if not sw_cfg_list:
             return result
@@ -208,10 +224,13 @@ def get_passthrough_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, An
                 continue
             tone_detect_config = ch.get("tone_detect_configuration", {})
             if tone_detect_config:
-                result["tone_passthrough"] = bool(tone_detect_config.get("tone_passthrough", False))
-                result["passthrough_channel"] = str(tone_detect_config.get("passthrough_channel", ""))
+                result["tone_passthrough"] = bool(
+                    tone_detect_config.get("tone_passthrough", False)
+                )
+                result["passthrough_channel"] = str(
+                    tone_detect_config.get("passthrough_channel", "")
+                )
             break
     except Exception as e:
         print(f"[CONFIG] ERROR: Failed to get passthrough config for {channel_id}: {e}")
     return result
-

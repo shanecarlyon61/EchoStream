@@ -11,8 +11,13 @@ _audio_streams_by_channel: Dict[int, Dict[str, object]] = {}
 _channel_output_device_index: Dict[int, int] = {}
 
 try:
-    from audio_devices import select_output_device_for_channel, open_output_stream, close_stream
+    from audio_devices import (
+        select_output_device_for_channel,
+        open_output_stream,
+        close_stream,
+    )
     from gpio_monitor import GPIO_PINS, gpio_states
+
     _AUDIO_OK = True
 except Exception as _e:
     print(f"[WEBSOCKET] WARNING: Audio/GPIO modules not fully available: {_e}")
@@ -54,15 +59,14 @@ async def connect_to_server_async(url: str) -> bool:
                 url,
                 subprotocols=["audio-protocol"],
                 ping_interval=20,  # Default websockets library behavior
-                ping_timeout=20    # Default websockets library behavior
+                ping_timeout=20,  # Default websockets library behavior
             )
         except TypeError:
             print(
-                "[WEBSOCKET] WARNING: websockets library does not support 'subprotocols' argument, trying without.")
+                "[WEBSOCKET] WARNING: websockets library does not support 'subprotocols' argument, trying without."
+            )
             global_ws_client = await websockets.connect(
-                url,
-                ping_interval=20,
-                ping_timeout=20
+                url, ping_interval=20, ping_timeout=20
             )
         ws_connected = True
         ws_url = url
@@ -95,7 +99,8 @@ def connect_to_server(url: str) -> bool:
         if loop.is_running():
 
             future = asyncio.run_coroutine_threadsafe(
-                connect_to_server_async(url), loop)
+                connect_to_server_async(url), loop
+            )
             result = future.result(timeout=10.0)
         else:
 
@@ -168,7 +173,8 @@ def send_message(message: str) -> bool:
         if ws_event_loop is not None and ws_event_loop.is_running():
 
             future = asyncio.run_coroutine_threadsafe(
-                send_message_async(message), ws_event_loop)
+                send_message_async(message), ws_event_loop
+            )
             return future.result(timeout=5.0)
         else:
 
@@ -176,7 +182,8 @@ def send_message(message: str) -> bool:
                 loop = asyncio.get_running_loop()
                 if loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(
-                        send_message_async(message), loop)
+                        send_message_async(message), loop
+                    )
                     return future.result(timeout=5.0)
                 else:
                     return loop.run_until_complete(send_message_async(message))
@@ -194,6 +201,7 @@ def send_message(message: str) -> bool:
     except Exception as e:
         print(f"[WEBSOCKET] ERROR: Exception in send_message: {e}")
         import traceback
+
         traceback.print_exc()
         return False
 
@@ -204,10 +212,7 @@ def register_channel(channel_id: str) -> bool:
         print(f"[WEBSOCKET] Channel {channel_id} already registered")
         return True
 
-    message = json.dumps({
-        "type": "register",
-        "channel_id": channel_id
-    })
+    message = json.dumps({"type": "register", "channel_id": channel_id})
 
     if send_message(message):
         registered_channels.append(channel_id)
@@ -217,7 +222,8 @@ def register_channel(channel_id: str) -> bool:
                 pending_register_ids.remove(channel_id)
                 print(
                     f"[WEBSOCKET] pending_register_ids updated: {
-                        len(pending_register_ids)} remaining")
+                        len(pending_register_ids)} remaining"
+                )
             except ValueError:
                 pass
         return True
@@ -228,6 +234,7 @@ def register_channel(channel_id: str) -> bool:
 def send_transmit_event(channel_id: str, active: bool) -> bool:
     try:
         import time as _time
+
         event_type = "transmit_started" if active else "transmit_ended"
         payload = {
             event_type: {
@@ -235,7 +242,7 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
                 "user_name": "EchoStream",
                 "agency_name": "Python",
                 "channel_id": channel_id,
-                "time": int(_time.time())
+                "time": int(_time.time()),
             }
         }
         message = json.dumps(payload)
@@ -246,13 +253,15 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
     try:
         if ws_event_loop is not None and ws_event_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(
-                send_message_async(message), ws_event_loop)
+                send_message_async(message), ws_event_loop
+            )
             try:
                 result = future.result(timeout=1.0)
                 if result:
                     status = "PTT PRESSED" if active else "PTT RELEASED"
                     print(
-                        f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})")
+                        f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})"
+                    )
                 return result
             except asyncio.TimeoutError:
                 print("[WEBSOCKET] WARNING: Transmit event timeout (non-critical)")
@@ -261,7 +270,8 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
             if send_message(message):
                 status = "PTT PRESSED" if active else "PTT RELEASED"
                 print(
-                    f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})")
+                    f"[WEBSOCKET] Sent transmit event for channel {channel_id} ({status})"
+                )
                 return True
     except Exception as e:
         print(f"[WEBSOCKET] WARNING: Failed to send transmit event: {e}")
@@ -271,13 +281,14 @@ def send_transmit_event(channel_id: str, active: bool) -> bool:
 def send_connect_message(channel_id: str) -> bool:
     try:
         import time as _time
+
         payload = {
             "connect": {
                 "affiliation_id": "12345",
                 "user_name": "EchoStream",
                 "agency_name": "Python",
                 "channel_id": channel_id,
-                "time": int(_time.time())
+                "time": int(_time.time()),
             }
         }
         message = json.dumps(payload)
@@ -302,7 +313,8 @@ def register_channels(channel_ids: List[str]) -> None:
                     pending_register_ids.remove(cid)
                     print(
                         f"[WEBSOCKET] pending_register_ids updated: {
-                            len(pending_register_ids)} remaining")
+                            len(pending_register_ids)} remaining"
+                    )
                 except ValueError:
                     pass
 
@@ -315,7 +327,8 @@ def request_register_channel(channel_id: str) -> None:
             pending_register_ids.append(channel_id)
             print(
                 f"[WEBSOCKET] Queued channel {channel_id} for registration (pending={
-                    len(pending_register_ids)})")
+                    len(pending_register_ids)})"
+            )
         return
     register_channels([channel_id])
 
@@ -325,12 +338,12 @@ def parse_udp_config(message: str) -> Optional[Dict[str, Any]]:
     try:
         data = json.loads(message)
 
-        if 'udp_port' in data and 'udp_host' in data:
+        if "udp_port" in data and "udp_host" in data:
             config = {
-                'udp_port': data.get('udp_port'),
-                'udp_host': data.get('udp_host'),
-                'websocket_id': data.get('websocket_id', data.get('udp_port')),
-                'aes_key': data.get('aes_key', 'N/A')
+                "udp_port": data.get("udp_port"),
+                "udp_host": data.get("udp_host"),
+                "websocket_id": data.get("websocket_id", data.get("udp_port")),
+                "aes_key": data.get("aes_key", "N/A"),
             }
             print(f"[WEBSOCKET] Parsed UDP config: {config}")
             return config
@@ -352,10 +365,10 @@ def handle_users_connected(message: Dict[str, Any]) -> None:
     users_connected_count += 1
 
     try:
-        users_data = message.get('users_connected', {})
+        users_data = message.get("users_connected", {})
         if isinstance(users_data, dict):
-            total_users = users_data.get('total', 0)
-            connected_users = users_data.get('connected', [])
+            total_users = users_data.get("total", 0)
+            connected_users = users_data.get("connected", [])
 
             if users_connected_count == 1:
                 print("=" * 60)
@@ -364,16 +377,15 @@ def handle_users_connected(message: Dict[str, Any]) -> None:
                 if connected_users:
                     print(f"  Connected users: {len(connected_users)}")
                     for idx, user in enumerate(connected_users[:5]):
-                        user_id = user.get(
-                            'id', user.get(
-                                'user_id', 'Unknown'))
+                        user_id = user.get("id", user.get("user_id", "Unknown"))
                         print(f"    User {idx + 1}: {user_id}")
                     if len(connected_users) > 5:
                         print(f"    ... and {len(connected_users) - 5} more")
                 print("=" * 60)
             else:
                 print(
-                    f"[WEBSOCKET] Users Connected Event #{users_connected_count}: {total_users} total user(s) online")
+                    f"[WEBSOCKET] Users Connected Event #{users_connected_count}: {total_users} total user(s) online"
+                )
                 if connected_users and len(connected_users) > 0:
                     print(f"  Active connections: {len(connected_users)}")
     except Exception as e:
@@ -381,7 +393,8 @@ def handle_users_connected(message: Dict[str, Any]) -> None:
 
 
 def register_message_handler(
-        message_type: str, handler: Callable[[Dict[str, Any]], None]):
+    message_type: str, handler: Callable[[Dict[str, Any]], None]
+):
 
     message_handlers[message_type] = handler
     print(f"[WEBSOCKET] Registered handler for message type: {message_type}")
@@ -400,7 +413,8 @@ def set_output_device_map(ch_idx_to_device: Dict[int, int]) -> None:
             _channel_output_device_index[int(k)] = int(v)
         print(
             f"[AUDIO] Output device map set for {
-                len(_channel_output_device_index)} channel(s)")
+                len(_channel_output_device_index)} channel(s)"
+        )
     except Exception as e:
         print(f"[AUDIO] WARNING: Failed setting output device map: {e}")
 
@@ -414,23 +428,23 @@ def _ensure_output_stream_for_channel_index(channel_index: int) -> None:
     if device_index is None:
         device_index = select_output_device_for_channel(channel_index)
     if device_index is None:
-        print(
-            f"[AUDIO] WARNING: No output device for channel index {channel_index}")
+        print(f"[AUDIO] WARNING: No output device for channel index {channel_index}")
         return
     pa, stream = open_output_stream(device_index)
     if pa is None or stream is None:
         return
-    _audio_streams_by_channel[channel_index] = {'pa': pa, 'stream': stream}
+    _audio_streams_by_channel[channel_index] = {"pa": pa, "stream": stream}
     print(
-        f"[AUDIO] Output stream opened on device {device_index} for channel index {channel_index}")
+        f"[AUDIO] Output stream opened on device {device_index} for channel index {channel_index}"
+    )
 
 
 def _close_all_output_streams() -> None:
     if not _AUDIO_OK:
         return
     for ch_idx, bundle in list(_audio_streams_by_channel.items()):
-        pa = bundle.get('pa')
-        stream = bundle.get('stream')
+        pa = bundle.get("pa")
+        stream = bundle.get("stream")
         try:
             if pa and stream:
                 close_stream(pa, stream)  # type: ignore[arg-type]
@@ -464,10 +478,9 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                 bundle = _audio_streams_by_channel.get(ch_index)
                 if bundle:
                     try:
-                        bundle['stream'].write(data)  # type: ignore[index]
+                        bundle["stream"].write(data)  # type: ignore[index]
                     except Exception as e:
-                        print(
-                            f"[UDP] WARNING: stream write failed ch={ch_index}: {e}")
+                        print(f"[UDP] WARNING: stream write failed ch={ch_index}: {e}")
         except Exception as e:
             print(f"[UDP] ERROR: datagram handler exception: {e}")
 
@@ -479,9 +492,8 @@ class _UDPProtocol(asyncio.DatagramProtocol):
 
 
 async def _async_start_udp_listener(
-        loop: asyncio.AbstractEventLoop,
-        udp_port: int,
-        host_hint: str = "") -> None:
+    loop: asyncio.AbstractEventLoop, udp_port: int, host_hint: str = ""
+) -> None:
     global _udp_transport, _udp_listening_port
     if _udp_transport is not None and _udp_listening_port == udp_port:
         return
@@ -491,28 +503,27 @@ async def _async_start_udp_listener(
         except Exception:
             pass
         _udp_transport = None
-    transport, _ = await loop.create_datagram_endpoint(_UDPProtocol, local_addr=('0.0.0.0', int(udp_port)))
+    transport, _ = await loop.create_datagram_endpoint(
+        _UDPProtocol, local_addr=("0.0.0.0", int(udp_port))
+    )
     _udp_transport = transport
     _udp_listening_port = udp_port
-    print(
-        f"[UDP] Listening for audio on 0.0.0.0:{udp_port} (server={host_hint})")
+    print(f"[UDP] Listening for audio on 0.0.0.0:{udp_port} (server={host_hint})")
 
 
 def _start_async_udp_listener(
-        loop: asyncio.AbstractEventLoop,
-        udp_port: int,
-        host_hint: str = "") -> None:
+    loop: asyncio.AbstractEventLoop, udp_port: int, host_hint: str = ""
+) -> None:
     global _udp_task
     try:
         if udp_port <= 0:
             return
         # schedule on the running loop
         _udp_task = loop.create_task(
-            _async_start_udp_listener(
-                loop, udp_port, host_hint))
+            _async_start_udp_listener(loop, udp_port, host_hint)
+        )
     except Exception as e:
-        print(
-            f"[UDP] ERROR: Failed to schedule async UDP listener on {udp_port}: {e}")
+        print(f"[UDP] ERROR: Failed to schedule async UDP listener on {udp_port}: {e}")
 
 
 async def websocket_handler_async(url: str):
@@ -527,45 +538,52 @@ async def websocket_handler_async(url: str):
             if global_ws_client is None or not ws_connected:
                 print(
                     f"[WEBSOCKET] Connection lost, attempting to reconnect in {
-                        reconnect_delay:.1f}s...")
+                        reconnect_delay:.1f}s..."
+                )
                 await asyncio.sleep(reconnect_delay)
 
                 if await connect_to_server_async(url):
                     print(
-                        "[WEBSOCKET] Reconnected successfully - waiting 0.5s before sending connect messages...")
+                        "[WEBSOCKET] Reconnected successfully - waiting 0.5s before sending connect messages..."
+                    )
                     await asyncio.sleep(0.5)
                     reconnect_delay = 1.0
 
                     if registered_channels:
                         print(
                             f"[WEBSOCKET] Re-sending connect messages for {
-                                len(registered_channels)} registered channel(s)")
+                                len(registered_channels)} registered channel(s)"
+                        )
                         for ch_id in list(registered_channels):
                             if send_connect_message(ch_id):
                                 print(
-                                    f"[WEBSOCKET] ✓ Re-sent connect message for channel {ch_id}")
+                                    f"[WEBSOCKET] ✓ Re-sent connect message for channel {ch_id}"
+                                )
                             else:
                                 print(
-                                    f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}")
+                                    f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}"
+                                )
                             await asyncio.sleep(0.1)
                     elif pending_register_ids:
                         print(
                             f"[WEBSOCKET] Re-sending connect messages for {
-                                len(pending_register_ids)} pending channel(s)")
+                                len(pending_register_ids)} pending channel(s)"
+                        )
                         for ch_id in list(pending_register_ids):
                             if send_connect_message(ch_id):
                                 if ch_id not in registered_channels:
                                     registered_channels.append(ch_id)
                                 print(
-                                    f"[WEBSOCKET] ✓ Re-sent connect message for channel {ch_id}")
+                                    f"[WEBSOCKET] ✓ Re-sent connect message for channel {ch_id}"
+                                )
                             else:
                                 print(
-                                    f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}")
+                                    f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}"
+                                )
                             await asyncio.sleep(0.1)
                         pending_register_ids.clear()
                 else:
-                    reconnect_delay = min(
-                        reconnect_delay * 2, max_reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                     continue
 
             last_keepalive_time = 0
@@ -580,7 +598,8 @@ async def websocket_handler_async(url: str):
                     if registered_channels:
                         print(
                             f"[WEBSOCKET] Sending keep-alive connect messages for {
-                                len(registered_channels)} channel(s)")
+                                len(registered_channels)} channel(s)"
+                        )
                         for ch_id in list(registered_channels):
                             send_connect_message(ch_id)
                             await asyncio.sleep(0.1)
@@ -588,19 +607,16 @@ async def websocket_handler_async(url: str):
 
                 try:
                     message = await asyncio.wait_for(
-                        global_ws_client.recv(),
-                        timeout=1.0
+                        global_ws_client.recv(), timeout=1.0
                     )
 
                     message_count += 1
 
                     message_text = (
-                        message.decode(
-                            'utf-8',
-                            errors='replace') if isinstance(
-                            message,
-                            (bytes,
-                             bytearray)) else message)
+                        message.decode("utf-8", errors="replace")
+                        if isinstance(message, (bytes, bytearray))
+                        else message
+                    )
                     message_text_stripped = message_text.strip()
 
                     if "users_connected" in message_text:
@@ -618,7 +634,8 @@ async def websocket_handler_async(url: str):
                             print(f"[WEBSOCKET] JSON decode error: {e}")
                             if message_text_stripped:
                                 print(
-                                    f"[WEBSOCKET] Message content: {message_text_stripped[:200]}")
+                                    f"[WEBSOCKET] Message content: {message_text_stripped[:200]}"
+                                )
                         continue
 
                     udp_config = parse_udp_config(message_text_stripped)
@@ -628,55 +645,74 @@ async def websocket_handler_async(url: str):
                                 udp_config_callback(udp_config)
                             except Exception as e:
                                 print(
-                                    f"[WEBSOCKET] ERROR: Exception in UDP config callback: {e}")
+                                    f"[WEBSOCKET] ERROR: Exception in UDP config callback: {e}"
+                                )
                         try:
                             from udp_player import global_udp_player
-                            udp_port = int(udp_config.get('udp_port', 0) or 0)
-                            udp_host = str(udp_config.get('udp_host', ''))
-                            aes_key = str(udp_config.get('aes_key', '') or '')
+
+                            udp_port = int(udp_config.get("udp_port", 0) or 0)
+                            udp_host = str(udp_config.get("udp_host", ""))
+                            aes_key = str(udp_config.get("aes_key", "") or "")
 
                             if pending_register_ids:
-                                global_udp_player.set_channel_ids(
-                                    pending_register_ids)
+                                global_udp_player.set_channel_ids(pending_register_ids)
                                 print(
-                                    f"[WEBSOCKET] Set channel IDs for UDP player: {pending_register_ids}")
+                                    f"[WEBSOCKET] Set channel IDs for UDP player: {pending_register_ids}"
+                                )
 
                             if udp_port > 0:
                                 print(
                                     f"[WEBSOCKET] Starting UDP player: port={udp_port}, host={udp_host}, aes_key={
-                                        'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}")
+                                        'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}"
+                                )
                                 if global_udp_player.start(
-                                        udp_port=udp_port, host_hint=udp_host, aes_key_b64=aes_key):
+                                    udp_port=udp_port,
+                                    host_hint=udp_host,
+                                    aes_key_b64=aes_key,
+                                ):
                                     print(
-                                        "[WEBSOCKET] UDP ready - starting audio transmission for active channels")
+                                        "[WEBSOCKET] UDP ready - starting audio transmission for active channels"
+                                    )
                                     if _AUDIO_OK:
-                                        channel_ids_to_check = registered_channels if registered_channels else global_udp_player._channel_ids
+                                        channel_ids_to_check = (
+                                            registered_channels
+                                            if registered_channels
+                                            else global_udp_player._channel_ids
+                                        )
                                         gpio_keys = list(GPIO_PINS.keys())
                                         for idx, channel_id in enumerate(
-                                                channel_ids_to_check):
+                                            channel_ids_to_check
+                                        ):
                                             if idx < len(gpio_keys):
                                                 gpio_num = gpio_keys[idx]
                                                 gpio_state = gpio_states.get(
-                                                    gpio_num, -1)
+                                                    gpio_num, -1
+                                                )
                                                 if gpio_state == 0:
                                                     print(
-                                                        f"[WEBSOCKET] Starting audio transmission for channel {channel_id} (GPIO {gpio_num} is ACTIVE, UDP now ready)")
+                                                        f"[WEBSOCKET] Starting audio transmission for channel {channel_id} (GPIO {gpio_num} is ACTIVE, UDP now ready)"
+                                                    )
                                                     if global_udp_player.start_transmission_for_channel(
-                                                            idx):
+                                                        idx
+                                                    ):
                                                         print(
-                                                            f"[WEBSOCKET] ✓ Audio transmission started for channel {channel_id}")
+                                                            f"[WEBSOCKET] ✓ Audio transmission started for channel {channel_id}"
+                                                        )
                                                     else:
                                                         print(
-                                                            f"[WEBSOCKET] ✗ Failed to start audio transmission for channel {channel_id}")
+                                                            f"[WEBSOCKET] ✗ Failed to start audio transmission for channel {channel_id}"
+                                                        )
                                                     send_transmit_event(
-                                                        channel_id, True)
+                                                        channel_id, True
+                                                    )
                             else:
                                 print(
-                                    f"[WEBSOCKET] WARNING: Invalid UDP port: {udp_port}")
+                                    f"[WEBSOCKET] WARNING: Invalid UDP port: {udp_port}"
+                                )
                         except Exception as e:
-                            print(
-                                f"[WEBSOCKET] ERROR: Failed to start UDP player: {e}")
+                            print(f"[WEBSOCKET] ERROR: Failed to start UDP player: {e}")
                             import traceback
+
                             traceback.print_exc()
                         continue
 
@@ -684,17 +720,17 @@ async def websocket_handler_async(url: str):
                         handle_users_connected(data)
                         continue
 
-                    message_type = data.get('type', 'unknown')
+                    message_type = data.get("type", "unknown")
                     if message_type in message_handlers:
                         try:
                             message_handlers[message_type](data)
                         except Exception as e:
                             print(
-                                f"[WEBSOCKET] ERROR: Exception in message handler for {message_type}: {e}")
+                                f"[WEBSOCKET] ERROR: Exception in message handler for {message_type}: {e}"
+                            )
                     else:
                         if message_count % 50 == 0:
-                            print(
-                                f"[WEBSOCKET] Unhandled message type: {message_type}")
+                            print(f"[WEBSOCKET] Unhandled message type: {message_type}")
 
                 except asyncio.TimeoutError:
                     continue
@@ -706,8 +742,10 @@ async def websocket_handler_async(url: str):
                 except Exception as e:
                     if not global_interrupted.is_set():
                         print(
-                            f"[WEBSOCKET] ERROR: Exception in message handler loop: {e}")
+                            f"[WEBSOCKET] ERROR: Exception in message handler loop: {e}"
+                        )
                         import traceback
+
                         traceback.print_exc()
                         ws_connected = False
                         global_ws_client = None
@@ -717,6 +755,7 @@ async def websocket_handler_async(url: str):
             if not global_interrupted.is_set():
                 print(f"[WEBSOCKET] FATAL: WebSocket handler crashed: {e}")
                 import traceback
+
                 traceback.print_exc()
                 ws_connected = False
                 global_ws_client = None
@@ -742,43 +781,52 @@ def global_websocket_thread(url: str):
         except Exception as e:
             print(f"[WEBSOCKET] ERROR: Failed initial connect: {e}")
             import traceback
+
             traceback.print_exc()
 
         if ws_connected:
             print(
-                "[WEBSOCKET] Initial connection successful - waiting 0.5s before sending connect messages...")
+                "[WEBSOCKET] Initial connection successful - waiting 0.5s before sending connect messages..."
+            )
             import time
+
             time.sleep(0.5)
 
             try:
                 if pending_register_ids:
                     print(
                         f"[WEBSOCKET] Sending connect messages for {
-                            len(pending_register_ids)} configured channel(s)")
+                            len(pending_register_ids)} configured channel(s)"
+                    )
                     for ch_id in list(pending_register_ids):
                         if send_connect_message(ch_id):
                             if ch_id not in registered_channels:
                                 registered_channels.append(ch_id)
                             print(
-                                f"[WEBSOCKET] ✓ Connect message sent for channel {ch_id}")
+                                f"[WEBSOCKET] ✓ Connect message sent for channel {ch_id}"
+                            )
                             time.sleep(0.1)
                         else:
                             print(
-                                f"[WEBSOCKET] ✗ Failed to send connect message for channel {ch_id}")
+                                f"[WEBSOCKET] ✗ Failed to send connect message for channel {ch_id}"
+                            )
                     pending_register_ids.clear()
                     print(
-                        f"[WEBSOCKET] All connect messages sent. Registered channels: {registered_channels}")
+                        f"[WEBSOCKET] All connect messages sent. Registered channels: {registered_channels}"
+                    )
                 else:
                     print(
-                        "[WEBSOCKET] WARNING: No channels configured (pending_register_ids is empty)")
+                        "[WEBSOCKET] WARNING: No channels configured (pending_register_ids is empty)"
+                    )
             except Exception as e:
-                print(
-                    f"[WEBSOCKET] ERROR: Failed to send connect messages: {e}")
+                print(f"[WEBSOCKET] ERROR: Failed to send connect messages: {e}")
                 import traceback
+
                 traceback.print_exc()
         else:
             print(
-                "[WEBSOCKET] WARNING: Initial connection failed, will retry in handler")
+                "[WEBSOCKET] WARNING: Initial connection failed, will retry in handler"
+            )
 
         print("[WEBSOCKET] Starting WebSocket handler (with reconnection)...")
         ws_event_loop.run_until_complete(websocket_handler_async(url))
@@ -786,6 +834,7 @@ def global_websocket_thread(url: str):
     except Exception as e:
         print(f"[WEBSOCKET] ERROR: Exception in WebSocket thread: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         try:
@@ -799,19 +848,20 @@ def global_websocket_thread(url: str):
             print("[WEBSOCKET] WebSocket thread stopped")
 
 
-def start_websocket(url: str = "wss://audio.redenes.org/ws/",
-                    channel_ids: Optional[List[str]] = None) -> threading.Thread:
+def start_websocket(
+    url: str = "wss://audio.redenes.org/ws/", channel_ids: Optional[List[str]] = None
+) -> threading.Thread:
     if isinstance(channel_ids, list) and channel_ids:
         pending_register_ids.clear()
-        pending_register_ids.extend([str(c).strip()
-                                    for c in channel_ids if str(c).strip()])
+        pending_register_ids.extend(
+            [str(c).strip() for c in channel_ids if str(c).strip()]
+        )
         try:
             from udp_player import global_udp_player
+
             global_udp_player.set_channel_ids(channel_ids)
         except Exception:
             pass
-    t = threading.Thread(
-        target=lambda: global_websocket_thread(url),
-        daemon=True)
+    t = threading.Thread(target=lambda: global_websocket_thread(url), daemon=True)
     t.start()
     return t

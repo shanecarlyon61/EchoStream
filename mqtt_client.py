@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 
 try:
     import paho.mqtt.client as mqtt
+
     MQTT_AVAILABLE = True
 except ImportError:
     MQTT_AVAILABLE = False
@@ -32,7 +33,7 @@ mqtt_mutex = threading.Lock()
 def get_device_id_from_config() -> Optional[str]:
     config_path = os.path.expanduser("~/.an/config.json")
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             cfg = json.load(f)
 
         unique_id = cfg.get("unique_id")
@@ -87,11 +88,12 @@ def _on_disconnect(client, userdata, rc):
             3: "Server unavailable",
             4: "Bad username or password",
             5: "Not authorized",
-            7: "Network error"
+            7: "Network error",
         }
         rc_msg = rc_messages.get(rc, f"Unknown error")
         print(
-            f"[MQTT] Unexpected disconnection (rc={rc}: {rc_msg}), will attempt to reconnect")
+            f"[MQTT] Unexpected disconnection (rc={rc}: {rc_msg}), will attempt to reconnect"
+        )
 
 
 def _reconnect_mqtt(within_mutex: bool = False) -> bool:
@@ -116,8 +118,7 @@ def _reconnect_mqtt(within_mutex: bool = False) -> bool:
                 print("[MQTT] ✓ Reconnected successfully")
                 return True
         except Exception as e:
-            print(
-                f"[MQTT] reconnect() failed: {e}, re-initializing connection...")
+            print(f"[MQTT] reconnect() failed: {e}, re-initializing connection...")
 
         try:
             global_mqtt.client.loop_stop()
@@ -153,9 +154,10 @@ def _reconnect_mqtt(within_mutex: bool = False) -> bool:
 
 
 def init_mqtt(
-        device_id: Optional[str] = None,
-        broker_host: Optional[str] = None,
-        broker_port: int = 8883) -> bool:
+    device_id: Optional[str] = None,
+    broker_host: Optional[str] = None,
+    broker_port: int = 8883,
+) -> bool:
     global global_mqtt
 
     if not MQTT_AVAILABLE:
@@ -163,14 +165,19 @@ def init_mqtt(
         return False
 
     with mqtt_mutex:
-        if global_mqtt.initialized and global_mqtt.client and global_mqtt.client.is_connected():
+        if (
+            global_mqtt.initialized
+            and global_mqtt.client
+            and global_mqtt.client.is_connected()
+        ):
             return True
 
         if not device_id:
             device_id = get_device_id_from_config()
             if not device_id:
                 print(
-                    "[MQTT] ERROR: device_id not provided and not found in config.json")
+                    "[MQTT] ERROR: device_id not provided and not found in config.json"
+                )
                 return False
 
         if not broker_host:
@@ -194,9 +201,7 @@ def init_mqtt(
             global_mqtt.client_key_path = key_path
 
             global_mqtt.client = mqtt.Client(
-                client_id=device_id,
-                clean_session=True,
-                protocol=mqtt.MQTTv311
+                client_id=device_id, clean_session=True, protocol=mqtt.MQTTv311
             )
             global_mqtt.client.on_connect = _on_connect
             global_mqtt.client.on_disconnect = _on_disconnect
@@ -207,18 +212,20 @@ def init_mqtt(
                         ca_certs=ca_path,
                         certfile=cert_path,
                         keyfile=key_path,
-                        tls_version=2
+                        tls_version=2,
                     )
                     print(f"[MQTT] TLS configured with certificates")
                 except Exception as e:
                     print(f"[MQTT] ERROR: TLS configuration failed: {e}")
                     import traceback
+
                     traceback.print_exc()
                     global_mqtt.initialized = True
                     return False
             else:
                 print(
-                    f"[MQTT] WARNING: Certificates not found, attempting connection without TLS")
+                    f"[MQTT] WARNING: Certificates not found, attempting connection without TLS"
+                )
 
             global_mqtt.client.reconnect_delay_set(min_delay=1, max_delay=120)
 
@@ -227,18 +234,20 @@ def init_mqtt(
             # In Python, loop_start() runs a background thread that does this
             # automatically
             print(
-                f"[MQTT] Connecting to {broker_host}:{broker_port} (keepalive=60s)...")
+                f"[MQTT] Connecting to {broker_host}:{broker_port} (keepalive=60s)..."
+            )
             try:
                 result = global_mqtt.client.connect(
-                    broker_host, broker_port, keepalive=60)
+                    broker_host, broker_port, keepalive=60
+                )
                 if result != mqtt.MQTT_ERR_SUCCESS:
-                    print(
-                        f"[MQTT] ERROR: connect() returned error code: {result}")
+                    print(f"[MQTT] ERROR: connect() returned error code: {result}")
                     global_mqtt.initialized = True
                     return False
             except Exception as e:
                 print(f"[MQTT] ERROR: connect() failed: {e}")
                 import traceback
+
                 traceback.print_exc()
                 global_mqtt.initialized = True
                 return False
@@ -256,13 +265,15 @@ def init_mqtt(
                     global_mqtt.connected = True
                     global_mqtt.initialized = True
                     print(
-                        f"[MQTT] ✓ Connected to broker at {broker_host}:{broker_port}")
+                        f"[MQTT] ✓ Connected to broker at {broker_host}:{broker_port}"
+                    )
                     time.sleep(0.5)
                     if global_mqtt.client.is_connected():
                         return True
                     else:
                         print(
-                            f"[MQTT] WARNING: Connection lost immediately after connect")
+                            f"[MQTT] WARNING: Connection lost immediately after connect"
+                        )
                         break
 
             print(f"[MQTT] WARNING: Connection timeout after 5 seconds")
@@ -271,13 +282,13 @@ def init_mqtt(
                 global_mqtt.initialized = True
                 return True
             else:
-                print(
-                    f"[MQTT] Connection not established, will retry on next publish")
+                print(f"[MQTT] Connection not established, will retry on next publish")
                 global_mqtt.initialized = True
                 return False
         except Exception as e:
             print(f"[MQTT] ERROR: Failed to initialize MQTT: {e}")
             import traceback
+
             traceback.print_exc()
             global_mqtt.initialized = True
             return False
@@ -332,7 +343,8 @@ def mqtt_publish(topic: str, payload: str) -> bool:
             else:
                 print(
                     f"[MQTT] ERROR: Failed to publish to '{topic}' (rc={
-                        result.rc})")
+                        result.rc})"
+                )
                 return False
         except Exception as e:
             print(f"[MQTT] ERROR: Exception during publish: {e}")
@@ -400,24 +412,26 @@ def publish_known_tone_detection(
     tone_b_range_hz: int,
     channel_id: str,
     record_length_ms: int = 0,
-    detection_tone_alert: Optional[str] = None
+    detection_tone_alert: Optional[str] = None,
 ) -> bool:
     if not global_mqtt.initialized or not global_mqtt.client:
         device_id = get_device_id_from_config()
         if device_id:
             broker = "a1d6e0zlehb0v9-ats.iot.us-west-2.amazonaws.com"
             port = 8883
-            print(
-                f"[MQTT] Attempting to connect to AWS IoT Core: {broker}:{port}")
+            print(f"[MQTT] Attempting to connect to AWS IoT Core: {broker}:{port}")
             if not init_mqtt(device_id, broker, port):
                 print(
-                    "[MQTT] Failed to initialize MQTT connection - tone detection logged but not published")
+                    "[MQTT] Failed to initialize MQTT connection - tone detection logged but not published"
+                )
                 return False
         else:
             print(
-                "[MQTT] Cannot publish: MQTT not initialized and device_id not available")
+                "[MQTT] Cannot publish: MQTT not initialized and device_id not available"
+            )
             print(
-                "[MQTT] Check that 'unique_id' exists in config.json (shadow.state.desired.unique_id)")
+                "[MQTT] Check that 'unique_id' exists in config.json (shadow.state.desired.unique_id)"
+            )
             return False
 
     try:
@@ -436,24 +450,22 @@ def publish_known_tone_detection(
             "timestamp": timestamp,
             "device_id": device_id,
             "event_type": "defined_tones_detected",
-            "tone_details": {
-                "tone_a": tone_a_hz,
-                "tone_b": tone_b_hz
-            }
+            "tone_details": {"tone_a": tone_a_hz, "tone_b": tone_b_hz},
         }
 
         topic = f"from/device/{device_id}/tone_detection"
-        json_payload = json.dumps(payload, separators=(',', ':'))
+        json_payload = json.dumps(payload, separators=(",", ":"))
 
         result = mqtt_publish(topic, json_payload)
 
         if result:
-            print(f"[MQTT] ✓ Published known tone detection to '{topic}': "
-                  f"A={tone_a_hz:.1f} Hz, B={tone_b_hz:.1f} Hz")
+            print(
+                f"[MQTT] ✓ Published known tone detection to '{topic}': "
+                f"A={tone_a_hz:.1f} Hz, B={tone_b_hz:.1f} Hz"
+            )
             print(f"[MQTT]   Message payload: {json_payload}")
         else:
-            print(
-                f"[MQTT] ✗ Failed to publish known tone detection to '{topic}'")
+            print(f"[MQTT] ✗ Failed to publish known tone detection to '{topic}'")
 
         return result
     except Exception as e:
@@ -467,15 +479,16 @@ def publish_new_tone_pair(tone_a_hz: float, tone_b_hz: float) -> bool:
         if device_id:
             broker = "a1d6e0zlehb0v9-ats.iot.us-west-2.amazonaws.com"
             port = 8883
-            print(
-                f"[MQTT] Attempting to connect to AWS IoT Core: {broker}:{port}")
+            print(f"[MQTT] Attempting to connect to AWS IoT Core: {broker}:{port}")
             if not init_mqtt(device_id, broker, port):
                 print(
-                    "[MQTT] Failed to initialize MQTT connection - tone pair logged but not published")
+                    "[MQTT] Failed to initialize MQTT connection - tone pair logged but not published"
+                )
                 return False
         else:
             print(
-                "[MQTT] Cannot publish: MQTT not initialized and device_id not available")
+                "[MQTT] Cannot publish: MQTT not initialized and device_id not available"
+            )
             return False
 
     try:
@@ -494,20 +507,19 @@ def publish_new_tone_pair(tone_a_hz: float, tone_b_hz: float) -> bool:
             "timestamp": timestamp,
             "device_id": device_id,
             "event_type": "new_tone_detected",
-            "tone_details": {
-                "tone_a": tone_a_hz,
-                "tone_b": tone_b_hz
-            }
+            "tone_details": {"tone_a": tone_a_hz, "tone_b": tone_b_hz},
         }
 
         topic = f"from/device/{device_id}/tone_detection"
-        json_payload = json.dumps(payload, separators=(',', ':'))
+        json_payload = json.dumps(payload, separators=(",", ":"))
 
         result = mqtt_publish(topic, json_payload)
 
         if result:
-            print(f"[MQTT] ✓ Published new tone pair to '{topic}': "
-                  f"A={tone_a_hz:.1f} Hz, B={tone_b_hz:.1f} Hz")
+            print(
+                f"[MQTT] ✓ Published new tone pair to '{topic}': "
+                f"A={tone_a_hz:.1f} Hz, B={tone_b_hz:.1f} Hz"
+            )
             print(f"[MQTT]   Message payload: {json_payload}")
         else:
             print(f"[MQTT] ✗ Failed to publish new tone pair to '{topic}'")

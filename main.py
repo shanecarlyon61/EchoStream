@@ -29,7 +29,9 @@ def main() -> int:
         if devices:
             print("[MAIN] Detected audio output devices:")
             for d in devices:
-                print(f"  - index={d.get('index')} name={d.get('name')} host_api={d.get('host_api')}")
+                print(
+                    f"  - index={d.get('index')} name={d.get('name')} host_api={d.get('host_api')}"
+                )
         else:
             print("[MAIN] WARNING: No audio output devices detected")
         ch_idx_to_device = {}
@@ -37,9 +39,13 @@ def main() -> int:
             dev_index = select_output_device_for_channel(ch_index)
             if dev_index is not None:
                 ch_idx_to_device[ch_index] = int(dev_index)
-                print(f"[MAIN] Channel {ch_index + 1} ({ch_ids[ch_index]}) -> audio_device_index {dev_index}")
+                print(
+                    f"[MAIN] Channel {ch_index + 1} ({ch_ids[ch_index]}) -> audio_device_index {dev_index}"
+                )
             else:
-                print(f"[MAIN] WARNING: No audio device selected for channel {ch_index + 1} ({ch_ids[ch_index]})")
+                print(
+                    f"[MAIN] WARNING: No audio device selected for channel {ch_index + 1} ({ch_ids[ch_index]})"
+                )
         if ch_idx_to_device:
             set_output_device_map(ch_idx_to_device)
     except Exception as e:
@@ -75,6 +81,7 @@ def main() -> int:
                 gpio_to_channel[gpio_num] = ch_ids[idx]
         # Callback to (lazily) register/connect channel when its GPIO becomes ACTIVE (value 0)
         from websocket_client import send_transmit_event, request_register_channel
+
         def _on_gpio_change(gpio_num: int, state: int):
             ch_id = gpio_to_channel.get(gpio_num)
             if not ch_id:
@@ -84,16 +91,22 @@ def main() -> int:
                 send_transmit_event(ch_id, True)
             elif state == 1:
                 send_transmit_event(ch_id, False)
+
         # Proactively check all configured channels against current GPIO states and connect ACTIVE ones
         from gpio_monitor import gpio_states
+
         print("[MAIN] Evaluating GPIO states for initial channel connections...")
         for idx, gpio_num in enumerate(gpio_keys):
             ch_id = gpio_to_channel.get(gpio_num)
             if not ch_id:
                 continue
             state = gpio_states.get(gpio_num, -1)
-            status = "ACTIVE" if state == 0 else ("INACTIVE" if state == 1 else "UNKNOWN")
-            print(f"[MAIN] Channel {idx + 1} ({ch_id}) mapped to GPIO {gpio_num}: {status}")
+            status = (
+                "ACTIVE" if state == 0 else ("INACTIVE" if state == 1 else "UNKNOWN")
+            )
+            print(
+                f"[MAIN] Channel {idx + 1} ({ch_id}) mapped to GPIO {gpio_num}: {status}"
+            )
             if state == 0:
                 print(f"[MAIN] Connecting ACTIVE channel {ch_id} via WebSocket")
                 request_register_channel(ch_id)
@@ -108,4 +121,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
