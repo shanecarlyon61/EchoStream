@@ -596,7 +596,10 @@ class UDPPlayer:
             print(f"[TONE DETECT] ERROR: Missing queue or flag for {channel_id}")
             return
 
+        chunk_count = 0
         process_count = 0
+        last_process_time = time.time()
+        PROCESS_INTERVAL = 0.25  # Process tone detection every 250ms instead of every chunk
 
         while running_flag.is_set():
             try:
@@ -606,9 +609,9 @@ class UDPPlayer:
                 except queue.Empty:
                     continue
 
-                process_count += 1
+                chunk_count += 1
 
-                # Apply frequency filters
+                # Apply frequency filters (fast operation)
                 if apply_audio_frequency_filters:
                     filters = self._frequency_filters.get(channel_id, [])
                     if filters:
@@ -620,23 +623,9 @@ class UDPPlayer:
                 else:
                     filtered_audio = audio_chunk
 
-                # Process tone detection
-                if process_audio_for_channel:
-                    if process_count <= 5 or process_count % 100 == 0:
-                        print(f"[TONE DETECT DEBUG] Channel {channel_id}: Processing audio (process_count={process_count})")
-                    try:
-                        detected_tone = process_audio_for_channel(
-                            channel_id, filtered_audio
-                        )
-                        if detected_tone:
-                            print(f"\n[TONE DETECT] *** TONE DETECTED ON {channel_id} ***")
-                            print(
-                                f"[TONE DETECT] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n"
-                            )
-                    except Exception as tone_err:
-                        print(f"[TONE DETECT] ERROR in process_audio_for_channel for {channel_id}: {tone_err}")
-                        import traceback
-                        traceback.print_exc()
+                # ALWAYS add samples to buffer (fast operation, just appending to list)
+                if add_audio_samples_for_channel:
+                    add_audio_samples_for_channel(channel_id, filtered_audio)
 
                 # Handle passthrough (in tone detection thread, not broadcasting)
                 if HAS_PASSTHROUGH and global_passthrough_manager:
@@ -665,6 +654,29 @@ class UDPPlayer:
                                 pass
                     except Exception:
                         pass
+
+                # Process tone detection periodically (expensive FFT operations)
+                current_time = time.time()
+                if process_audio_for_channel and (current_time - last_process_time) >= PROCESS_INTERVAL:
+                    process_count += 1
+                    last_process_time = current_time
+                    
+                    if process_count <= 5 or process_count % 20 == 0:
+                        print(f"[TONE DETECT DEBUG] Channel {channel_id}: Processing tone detection (process_count={process_count}, chunks_processed={chunk_count})")
+                    
+                    try:
+                        detected_tone = process_audio_for_channel(
+                            channel_id, filtered_audio
+                        )
+                        if detected_tone:
+                            print(f"\n[TONE DETECT] *** TONE DETECTED ON {channel_id} ***")
+                            print(
+                                f"[TONE DETECT] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n"
+                            )
+                    except Exception as tone_err:
+                        print(f"[TONE DETECT] ERROR in process_audio_for_channel for {channel_id}: {tone_err}")
+                        import traceback
+                        traceback.print_exc()
 
                 audio_queue.task_done()
 
@@ -735,11 +747,16 @@ class UDPPlayer:
             try:
                 data = stream.read(1024, exception_on_overflow=False)
                 if len(data) == 0:
+                    if send_count <= 10:
+                        print(f"[AUDIO TX DEBUG] Channel {channel_id}: stream.read() returned 0 bytes")
                     time.sleep(0.01)
                     continue
 
                 read_count += 1
                 audio_data = np.frombuffer(data, dtype=np.float32)
+                
+                if send_count <= 10 or send_count % 1000 == 0:
+                    print(f"[AUDIO TX DEBUG] Channel {channel_id}: Read {len(data)} bytes from stream (read_count={read_count})")
 
                 for sample in audio_data:
                     input_buffer[bundle[buffer_pos_key]] = sample
@@ -834,7 +851,7 @@ class UDPPlayer:
                 if not self._running.is_set():
                     loop_exit_reason = "_running is False after exception"
                     break
-                if send_count % 100 == 0:
+                if send_count <= 10 or send_count % 100 == 0:
                     print(f"[AUDIO TX] Input error for {channel_id}: {e}")
                     import traceback
                     traceback.print_exc()
