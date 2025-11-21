@@ -909,7 +909,7 @@ class UDPPlayer:
             # Start tone detection thread
             if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
                 try:
-                    # Create queue for audio chunks (max 10 chunks buffered)
+                    print("[TONE DETECT] This is the final step to start tone detectio thread")
                     self._tone_detect_queues[channel_id] = queue.Queue(maxsize=10)
 
                     # Start tone detection worker thread
