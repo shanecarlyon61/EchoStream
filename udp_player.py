@@ -178,9 +178,7 @@ class UDPPlayer:
                         self._config_cache, channel_id)
                     if filters:
                         self._frequency_filters[channel_id] = filters
-                        print(
-                            f"[UDP] Loaded {
-                                len(filters)} frequency filter(s) for tone detection on channel {channel_id}")
+                        print(f"[UDP] Loaded {len(filters)} frequency filter(s) for tone detection on channel {channel_id}")
                     else:
                         self._frequency_filters[channel_id] = []
 
