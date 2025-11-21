@@ -687,10 +687,7 @@ def global_websocket_thread(url: str):
 
             try:
                 if pending_register_ids:
-                    print(
-                        f"[WEBSOCKET] Sending connect messages for {
-                            len(pending_register_ids)} configured channel(s)"
-                    )
+                    print(f"[WEBSOCKET] Sending connect messages for {len(pending_register_ids)} configured channel(s)")
                     for ch_id in list(pending_register_ids):
                         if send_connect_message(ch_id):
                             if ch_id not in registered_channels:
