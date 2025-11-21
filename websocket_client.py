@@ -292,10 +292,7 @@ def register_channels(channel_ids: List[str]) -> None:
             if cid in pending_register_ids:
                 try:
                     pending_register_ids.remove(cid)
-                    print(
-                        f"[WEBSOCKET] pending_register_ids updated: {
-                            len(pending_register_ids)} remaining"
-                    )
+                    print(f"[WEBSOCKET] pending_register_ids updated: {len(pending_register_ids)} remaining")
                 except ValueError:
                     pass
 
@@ -306,10 +303,7 @@ def request_register_channel(channel_id: str) -> None:
     if not ws_connected or global_ws_client is None:
         if channel_id not in pending_register_ids:
             pending_register_ids.append(channel_id)
-            print(
-                f"[WEBSOCKET] Queued channel {channel_id} for registration (pending={
-                    len(pending_register_ids)})"
-            )
+            print(f"[WEBSOCKET] Queued channel {channel_id} for registration (pending={len(pending_register_ids)})")
         return
     register_channels([channel_id])
 
@@ -388,10 +382,7 @@ def set_output_device_map(ch_idx_to_device: Dict[int, int]) -> None:
         _channel_output_device_index.clear()
         for k, v in ch_idx_to_device.items():
             _channel_output_device_index[int(k)] = int(v)
-        print(
-            f"[AUDIO] Output device map set for {
-                len(_channel_output_device_index)} channel(s)"
-        )
+        print(f"[AUDIO] Output device map set for {len(_channel_output_device_index)} channel(s)")
     except Exception as e:
         print(f"[AUDIO] WARNING: Failed setting output device map: {e}")
 
@@ -503,10 +494,7 @@ async def websocket_handler_async(url: str):
     while not global_interrupted.is_set():
         try:
             if global_ws_client is None or not ws_connected:
-                print(
-                    f"[WEBSOCKET] Connection lost, attempting to reconnect in {
-                        reconnect_delay:.1f}s..."
-                )
+                print(f"[WEBSOCKET] Connection lost, attempting to reconnect in {reconnect_delay:.1f}s...")
                 await asyncio.sleep(reconnect_delay)
 
                 if await connect_to_server_async(url):
@@ -515,10 +503,7 @@ async def websocket_handler_async(url: str):
                     reconnect_delay = 1.0
 
                     if registered_channels:
-                        print(
-                            f"[WEBSOCKET] Re-sending connect messages for {
-                                len(registered_channels)} registered channel(s)"
-                        )
+                        print(f"[WEBSOCKET] Re-sending connect messages for {len(registered_channels)} registered channel(s)")
                         for ch_id in list(registered_channels):
                             if send_connect_message(ch_id):
                                 print(f"[WEBSOCKET] ✓ Re-sent connect message for channel {ch_id}")
@@ -526,10 +511,7 @@ async def websocket_handler_async(url: str):
                                 print(f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}")
                             await asyncio.sleep(0.1)
                     elif pending_register_ids:
-                        print(
-                            f"[WEBSOCKET] Re-sending connect messages for {
-                                len(pending_register_ids)} pending channel(s)"
-                        )
+                        print(f"[WEBSOCKET] Re-sending connect messages for {len(pending_register_ids)} pending channel(s)")
                         for ch_id in list(pending_register_ids):
                             if send_connect_message(ch_id):
                                 if ch_id not in registered_channels:
@@ -553,10 +535,7 @@ async def websocket_handler_async(url: str):
                 current_time = time.time()
                 if current_time - last_keepalive_time >= keepalive_interval:
                     if registered_channels:
-                        print(
-                            f"[WEBSOCKET] Sending keep-alive connect messages for {
-                                len(registered_channels)} channel(s)"
-                        )
+                        print(f"[WEBSOCKET] Sending keep-alive connect messages for {len(registered_channels)} channel(s)")
                         for ch_id in list(registered_channels):
                             send_connect_message(ch_id)
                             await asyncio.sleep(0.1)
@@ -606,10 +585,7 @@ async def websocket_handler_async(url: str):
                                 print(f"[WEBSOCKET] Set channel IDs for UDP player: {pending_register_ids}")
 
                             if udp_port > 0:
-                                print(
-                                    f"[WEBSOCKET] Starting UDP player: port={udp_port}, host={udp_host}, aes_key={
-                                        'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}"
-                                )
+                                print(f"[WEBSOCKET] Starting UDP player: port={udp_port}, host={udp_host}, aes_key={'SET' if aes_key and aes_key != 'N/A' else 'N/A (will use hardcoded)'}")
                                 if global_udp_player.start(
                                     udp_port=udp_port,
                                     host_hint=udp_host,
