@@ -834,81 +834,81 @@ class UDPPlayer:
                         # These run after transmission to avoid delays
                         # ================================================
 
-                        # Copy to tone detection buffer (non-blocking)
-                        if (HAS_TONE_DETECT and self._tone_detect_enabled.get(
-                                channel_id, False)):
-                            try:
-                                with self._tone_detect_buffer_lock:
-                                    tone_buffer = self._tone_detect_buffers.get(
-                                        channel_id)
-                                    if tone_buffer is not None:
-                                        tone_pos = self._tone_detect_buffer_pos.get(
-                                            channel_id, 0)
+                        # # Copy to tone detection buffer (non-blocking)
+                        # if (HAS_TONE_DETECT and self._tone_detect_enabled.get(
+                        #         channel_id, False)):
+                        #     try:
+                        #         with self._tone_detect_buffer_lock:
+                        #             tone_buffer = self._tone_detect_buffers.get(
+                        #                 channel_id)
+                        #             if tone_buffer is not None:
+                        #                 tone_pos = self._tone_detect_buffer_pos.get(
+                        #                     channel_id, 0)
 
-                                        # Add samples to circular buffer
-                                        samples_to_add = len(audio_chunk)
-                                        space_remaining = self._tone_detect_buffer_size - tone_pos
+                        #                 # Add samples to circular buffer
+                        #                 samples_to_add = len(audio_chunk)
+                        #                 space_remaining = self._tone_detect_buffer_size - tone_pos
 
-                                        if samples_to_add <= space_remaining:
-                                            tone_buffer[tone_pos:tone_pos +
-                                                        samples_to_add] = audio_chunk
-                                            self._tone_detect_buffer_pos[channel_id] = tone_pos + \
-                                                samples_to_add
-                                            if send_count <= 5 or send_count % 500 == 0:
-                                                print(
-                                                    f"[AUDIO TX] Copied {samples_to_add} samples to tone buffer "
-                                                    f"(pos: {tone_pos} -> {tone_pos + samples_to_add})")
-                                        else:
-                                            # Buffer full, shift left
-                                            shift_amount = samples_to_add
-                                            tone_buffer[:-
-                                                        shift_amount] = tone_buffer[shift_amount:]
-                                            tone_buffer[-shift_amount:] = audio_chunk
-                                            self._tone_detect_buffer_pos[channel_id] = self._tone_detect_buffer_size
-                                            if send_count <= 5:
-                                                print(
-                                                    f"[AUDIO TX] Buffer full, shifted {shift_amount} samples")
-                                    else:
-                                        if send_count <= 5:
-                                            print(
-                                                f"[AUDIO TX] WARNING: No tone buffer for channel {channel_id}")
-                            except Exception as e:
-                                if send_count <= 10:
-                                    print(
-                                        f"[AUDIO TX] WARNING: Tone buffer copy failed: {e}")
+                        #                 if samples_to_add <= space_remaining:
+                        #                     tone_buffer[tone_pos:tone_pos +
+                        #                                 samples_to_add] = audio_chunk
+                        #                     self._tone_detect_buffer_pos[channel_id] = tone_pos + \
+                        #                         samples_to_add
+                        #                     if send_count <= 5 or send_count % 500 == 0:
+                        #                         print(
+                        #                             f"[AUDIO TX] Copied {samples_to_add} samples to tone buffer "
+                        #                             f"(pos: {tone_pos} -> {tone_pos + samples_to_add})")
+                        #                 else:
+                        #                     # Buffer full, shift left
+                        #                     shift_amount = samples_to_add
+                        #                     tone_buffer[:-
+                        #                                 shift_amount] = tone_buffer[shift_amount:]
+                        #                     tone_buffer[-shift_amount:] = audio_chunk
+                        #                     self._tone_detect_buffer_pos[channel_id] = self._tone_detect_buffer_size
+                        #                     if send_count <= 5:
+                        #                         print(
+                        #                             f"[AUDIO TX] Buffer full, shifted {shift_amount} samples")
+                        #             else:
+                        #                 if send_count <= 5:
+                        #                     print(
+                        #                         f"[AUDIO TX] WARNING: No tone buffer for channel {channel_id}")
+                        #     except Exception as e:
+                        #         if send_count <= 10:
+                        #             print(
+                        #                 f"[AUDIO TX] WARNING: Tone buffer copy failed: {e}")
 
-                        # Passthrough routing (after UDP send)
-                        if HAS_PASSTHROUGH and global_passthrough_manager:
-                            try:
-                                global_passthrough_manager.cleanup_expired_sessions()
-                                if global_passthrough_manager.is_active(
-                                        channel_id):
-                                    passthrough_active = True
-                                    try:
-                                        global_passthrough_manager.route_audio(
-                                            channel_id, audio_chunk)
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
+                        # # Passthrough routing (after UDP send)
+                        # if HAS_PASSTHROUGH and global_passthrough_manager:
+                        #     try:
+                        #         global_passthrough_manager.cleanup_expired_sessions()
+                        #         if global_passthrough_manager.is_active(
+                        #                 channel_id):
+                        #             passthrough_active = True
+                        #             try:
+                        #                 global_passthrough_manager.route_audio(
+                        #                     channel_id, audio_chunk)
+                        #             except Exception:
+                        #                 pass
+                        #     except Exception:
+                        #         pass
 
-                        # Recording routing (after UDP send)
-                        if HAS_RECORDING and global_recording_manager:
-                            try:
-                                global_recording_manager.cleanup_expired_sessions()
-                                if global_recording_manager.is_active(
-                                        channel_id):
-                                    try:
-                                        global_recording_manager.route_audio(
-                                            channel_id, audio_chunk)
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
+                        # # Recording routing (after UDP send)
+                        # if HAS_RECORDING and global_recording_manager:
+                        #     try:
+                        #         global_recording_manager.cleanup_expired_sessions()
+                        #         if global_recording_manager.is_active(
+                        #                 channel_id):
+                        #             try:
+                        #                 global_recording_manager.route_audio(
+                        #                     channel_id, audio_chunk)
+                        #             except Exception:
+                        #                 pass
+                        #     except Exception:
+                        #         pass
 
-                        if send_count == 1 and passthrough_active:
-                            print(
-                                f"[AUDIO TX] Passthrough active for channel {channel_id}, continuing transmission...")
+                        # if send_count == 1 and passthrough_active:
+                        #     print(
+                        #         f"[AUDIO TX] Passthrough active for channel {channel_id}, continuing transmission...")
 
                         # Reset buffer position
                         bundle[buffer_pos_key] = 0
