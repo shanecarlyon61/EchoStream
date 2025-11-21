@@ -5,6 +5,7 @@ import json
 import os
 import time
 import errno
+import queue
 import numpy as np
 from typing import Dict, Optional, List, Tuple, Any
 
@@ -91,18 +92,12 @@ class UDPPlayer:
         self._tone_detect_enabled: Dict[str, bool] = {}
         self._config_cache: Optional[Dict[str, Any]] = None
 
-        # Tone detection separate thread architecture
-        # channel_id -> audio buffer for tone detection
-        self._tone_detect_buffers: Dict[str, np.ndarray] = {}
-        # channel_id -> write position
-        self._tone_detect_buffer_pos: Dict[str, int] = {}
-        self._tone_detect_buffer_lock = threading.Lock()
-        # channel_id -> detection thread
+        # Tone detection threads with queues (no buffer copying)
+        # Broadcasting thread puts audio references in queue
+        # Tone detection thread processes from queue
+        self._tone_detect_queues: Dict[str, queue.Queue] = {}
         self._tone_detect_threads: Dict[str, threading.Thread] = {}
-        # channel_id -> running flag
         self._tone_detect_running: Dict[str, threading.Event] = {}
-        # Buffer size: 10 seconds at 48kHz
-        self._tone_detect_buffer_size = 48000 * 10
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
         with self._lock:
@@ -110,25 +105,20 @@ class UDPPlayer:
                 bundle = self._streams[channel_index]
                 stream = bundle.get("stream")
                 # Ensure stream is started
-                if stream and hasattr(stream,
-                                      'is_active') and not stream.is_active():
+                if stream and hasattr(stream, 'is_active') and not stream.is_active():
                     try:
                         stream.start_stream()  # type: ignore[attr-defined]
-                        print(
-                            f"[AUDIO] Started output stream for channel index {channel_index}")
+                        print(f"[AUDIO] Started output stream for channel index {channel_index}")
                     except Exception as e:
-                        print(
-                            f"[AUDIO] WARNING: Failed to start stream for channel {channel_index}: {e}")
+                        print(f"[AUDIO] WARNING: Failed to start stream for channel {channel_index}: {e}")
                 return
             device_index = select_output_device_for_channel(channel_index)
             if device_index is None:
-                print(
-                    f"[AUDIO] WARNING: No device available for channel index {channel_index}")
+                print(f"[AUDIO] WARNING: No device available for channel index {channel_index}")
                 return
             pa, stream = open_output_stream(device_index)
             if pa is None or stream is None:
-                print(
-                    f"[AUDIO] ERROR: Failed to open output stream for channel index {channel_index}")
+                print(f"[AUDIO] ERROR: Failed to open output stream for channel index {channel_index}")
                 return
             # Start the stream immediately
             try:
@@ -137,13 +127,11 @@ class UDPPlayer:
                 print(f"[AUDIO] WARNING: Failed to start stream: {e}")
             # keep PA for lifecycle consistency
             self._streams[channel_index] = {"pa": pa, "stream": stream}
-            print(
-                f"[AUDIO] Output stream ready and started on device {device_index} for channel index {channel_index}")
+            print(f"[AUDIO] Output stream ready and started on device {device_index} for channel index {channel_index}")
 
     def set_channel_ids(self, channel_ids: List[str]) -> None:
         # Preserve order to map index
-        self._channel_ids = [str(c).strip()
-                             for c in channel_ids if str(c).strip()]
+        self._channel_ids = [str(c).strip() for c in channel_ids if str(c).strip()]
         if HAS_PASSTHROUGH and global_passthrough_manager:
             all_channel_ids = []
             if load_config and get_channel_ids:
@@ -573,124 +561,58 @@ class UDPPlayer:
                         pass
             self._input_streams.clear()
 
+
     def _tone_detection_worker(self, channel_id: str) -> None:
         """
-        Dedicated tone detection worker thread - runs independently from audio transmission.
-        Periodically processes audio buffer for tone detection without blocking transmission.
+        Tone detection worker thread - processes audio from queue (no copying).
+        Reads audio buffer references from queue and processes them.
         """
         print(f"[TONE DETECT] Worker thread started for channel {channel_id}")
 
         running_flag = self._tone_detect_running.get(channel_id)
-        if not running_flag:
-            print(
-                f"[TONE DETECT] ERROR: No running flag for channel {channel_id}")
+        audio_queue = self._tone_detect_queues.get(channel_id)
+
+        if not running_flag or not audio_queue:
+            print(f"[TONE DETECT] ERROR: Missing queue or flag for {channel_id}")
             return
 
-        process_interval = 0.25  # Process every 250ms
-        last_process_time = 0.0
         process_count = 0
-        last_buffer_pos = 0  # Track what we've already processed
-
-        # Give audio thread time to start filling buffer
-        time.sleep(0.5)
-        print(
-            f"[TONE DETECT] Starting processing loop for channel {channel_id}")
 
         while running_flag.is_set():
             try:
-                current_time = time.time()
-
-                # Only process periodically (not continuously)
-                if current_time - last_process_time < process_interval:
-                    time.sleep(0.05)  # Sleep 50ms between checks
+                # Get audio buffer reference from queue (timeout 0.1s)
+                try:
+                    audio_chunk = audio_queue.get(timeout=0.1)
+                except queue.Empty:
                     continue
 
-                last_process_time = current_time
                 process_count += 1
 
-                # Get NEW samples since last processing (thread-safe)
-                with self._tone_detect_buffer_lock:
-                    buffer = self._tone_detect_buffers.get(channel_id)
-                    buffer_pos = self._tone_detect_buffer_pos.get(
-                        channel_id, 0)
-
-                    if buffer is None:
-                        if process_count == 1:
-                            print(
-                                f"[TONE DETECT] WARNING: No buffer for channel {channel_id}")
-                        time.sleep(0.05)
-                        continue
-
-                    if buffer_pos < 1920:
-                        if process_count <= 5:
-                            print(
-                                f"[TONE DETECT] Waiting for samples: {buffer_pos}/1920 for channel {channel_id}")
-                        time.sleep(0.05)
-                        continue
-
-                    # Check if we have new samples
-                    if buffer_pos == last_buffer_pos:
-                        # No new samples since last check
-                        if process_count <= 10 and process_count % 5 == 0:
-                            print(
-                                f"[TONE DETECT] No new samples (pos={buffer_pos}) for channel {channel_id}")
-                        time.sleep(0.05)
-                        continue
-
-                    # Get new samples since last processing
-                    if last_buffer_pos < buffer_pos:
-                        new_samples = buffer[last_buffer_pos:buffer_pos].copy()
-                        last_buffer_pos = buffer_pos
-                    else:
-                        # Buffer wrapped (shouldn't happen with our current
-                        # logic)
-                        new_samples = buffer[:buffer_pos].copy()
-                        last_buffer_pos = buffer_pos
-
-                if process_count <= 5 or process_count % 20 == 0:
-                    print(
-                        f"[TONE DETECT] Processing {len(new_samples)} new samples "
-                        f"for channel {channel_id} (total: {buffer_pos})")
-
-                # Apply filtering (outside lock to avoid blocking transmission)
+                # Apply frequency filters
                 if apply_audio_frequency_filters:
                     filters = self._frequency_filters.get(channel_id, [])
                     if filters:
-                        filtered_audio = apply_audio_frequency_filters(
-                            new_samples, filters, sample_rate=48000
-                        )
-                        if process_count <= 3:
-                            print(
-                                f"[TONE DETECT] Applied {len(filters)} "
-                                f"filter(s) to audio")
+                        filtered_audio = apply_audio_frequency_filters(audio_chunk, filters, sample_rate=48000)
                     else:
-                        filtered_audio = new_samples
+                        filtered_audio = audio_chunk
                 else:
-                    filtered_audio = new_samples
+                    filtered_audio = audio_chunk
 
-                # Process with tone detection (adds to internal buffer and
-                # analyzes)
+                # Process tone detection
                 if process_audio_for_channel:
-                    detected_tone = process_audio_for_channel(
-                        channel_id, filtered_audio
-                    )
+                    detected_tone = process_audio_for_channel(channel_id, filtered_audio)
                     if detected_tone:
-                        print(
-                            f"\n[TONE DETECT] *** TONE SEQUENCE DETECTED ON CHANNEL {channel_id} ***")
-                        print(
-                            f"[TONE DETECT] Tone ID: "
-                            f"{detected_tone.get('tone_id', 'unknown')}\n")
-                else:
-                    if process_count == 1:
-                        print(
-                            "[TONE DETECT] WARNING: process_audio_for_channel not available")
+                        print(f"\n[TONE DETECT] *** TONE DETECTED ON {channel_id} ***")
+                        print(f"[TONE DETECT] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n")
+
+                # Mark task as done
+                audio_queue.task_done()
 
             except Exception as e:
-                print(
-                    f"[TONE DETECT] ERROR in worker thread for {channel_id}: {e}")
+                print(f"[TONE DETECT] ERROR in worker for {channel_id}: {e}")
                 import traceback
                 traceback.print_exc()
-                time.sleep(1.0)  # Back off on error
+                time.sleep(0.5)
 
         print(f"[TONE DETECT] Worker thread stopped for channel {channel_id}")
 
@@ -805,7 +727,7 @@ class UDPPlayer:
                                             self._sock.sendto(msg.encode('utf-8'), self._server_addr)  # nosec
 
                                             send_count += 1
-                                            if send_count <= 5 or send_count % 500 == 0:
+                                            if send_count <= 5 or send_count % 10000 == 0:
                                                 print(f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
                                                       f"({len(msg)} bytes) to {self._server_addr}")
                                         else:
@@ -826,84 +748,56 @@ class UDPPlayer:
 
                         # ================================================
                         # AFTER UDP send: Handle secondary operations
-                        # These run after transmission to avoid delays
+                        # Put audio_chunk in queue (no copying, separate thread)
                         # ================================================
 
-                        # # Copy to tone detection buffer (non-blocking)
-                        # if (HAS_TONE_DETECT and self._tone_detect_enabled.get(
-                        #         channel_id, False)):
-                        #     try:
-                        #         with self._tone_detect_buffer_lock:
-                        #             tone_buffer = self._tone_detect_buffers.get(
-                        #                 channel_id)
-                        #             if tone_buffer is not None:
-                        #                 tone_pos = self._tone_detect_buffer_pos.get(
-                        #                     channel_id, 0)
+                        # Tone detection (put buffer in queue for async processing)
+                        if (HAS_TONE_DETECT and 
+                            self._tone_detect_enabled.get(channel_id, False)):
+                            tone_queue = self._tone_detect_queues.get(channel_id)
+                            if tone_queue:
+                                try:
+                                    # Put audio_chunk in queue (non-blocking)
+                                    # Queue holds references to audio chunks
+                                    tone_queue.put_nowait(audio_chunk)
+                                except queue.Full:
+                                    # Queue full, skip (tone detection is best-effort)
+                                    if send_count % 100 == 0:
+                                        print(f"[TONE DETECT] Queue full for {channel_id}")
+                                except Exception as e:
+                                    if send_count <= 10:
+                                        print(f"[TONE DETECT] Queue error: {e}")
 
-                        #                 # Add samples to circular buffer
-                        #                 samples_to_add = len(audio_chunk)
-                        #                 space_remaining = self._tone_detect_buffer_size - tone_pos
+                        # Passthrough routing (use same buffer)
+                        if HAS_PASSTHROUGH and global_passthrough_manager:
+                            try:
+                                global_passthrough_manager.cleanup_expired_sessions()
+                                if global_passthrough_manager.is_active(channel_id):
+                                    passthrough_active = True
+                                    try:
+                                        global_passthrough_manager.route_audio(
+                                            channel_id, audio_chunk)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
 
-                        #                 if samples_to_add <= space_remaining:
-                        #                     tone_buffer[tone_pos:tone_pos +
-                        #                                 samples_to_add] = audio_chunk
-                        #                     self._tone_detect_buffer_pos[channel_id] = tone_pos + \
-                        #                         samples_to_add
-                        #                     if send_count <= 5 or send_count % 500 == 0:
-                        #                         print(
-                        #                             f"[AUDIO TX] Copied {samples_to_add} samples to tone buffer "
-                        #                             f"(pos: {tone_pos} -> {tone_pos + samples_to_add})")
-                        #                 else:
-                        #                     # Buffer full, shift left
-                        #                     shift_amount = samples_to_add
-                        #                     tone_buffer[:-
-                        #                                 shift_amount] = tone_buffer[shift_amount:]
-                        #                     tone_buffer[-shift_amount:] = audio_chunk
-                        #                     self._tone_detect_buffer_pos[channel_id] = self._tone_detect_buffer_size
-                        #                     if send_count <= 5:
-                        #                         print(
-                        #                             f"[AUDIO TX] Buffer full, shifted {shift_amount} samples")
-                        #             else:
-                        #                 if send_count <= 5:
-                        #                     print(
-                        #                         f"[AUDIO TX] WARNING: No tone buffer for channel {channel_id}")
-                        #     except Exception as e:
-                        #         if send_count <= 10:
-                        #             print(
-                        #                 f"[AUDIO TX] WARNING: Tone buffer copy failed: {e}")
+                        # Recording routing (use same buffer)
+                        if HAS_RECORDING and global_recording_manager:
+                            try:
+                                global_recording_manager.cleanup_expired_sessions()
+                                if global_recording_manager.is_active(channel_id):
+                                    try:
+                                        global_recording_manager.route_audio(
+                                            channel_id, audio_chunk)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
 
-                        # # Passthrough routing (after UDP send)
-                        # if HAS_PASSTHROUGH and global_passthrough_manager:
-                        #     try:
-                        #         global_passthrough_manager.cleanup_expired_sessions()
-                        #         if global_passthrough_manager.is_active(
-                        #                 channel_id):
-                        #             passthrough_active = True
-                        #             try:
-                        #                 global_passthrough_manager.route_audio(
-                        #                     channel_id, audio_chunk)
-                        #             except Exception:
-                        #                 pass
-                        #     except Exception:
-                        #         pass
-
-                        # # Recording routing (after UDP send)
-                        # if HAS_RECORDING and global_recording_manager:
-                        #     try:
-                        #         global_recording_manager.cleanup_expired_sessions()
-                        #         if global_recording_manager.is_active(
-                        #                 channel_id):
-                        #             try:
-                        #                 global_recording_manager.route_audio(
-                        #                     channel_id, audio_chunk)
-                        #             except Exception:
-                        #                 pass
-                        #     except Exception:
-                        #         pass
-
-                        # if send_count == 1 and passthrough_active:
-                        #     print(
-                        #         f"[AUDIO TX] Passthrough active for channel {channel_id}, continuing transmission...")
+                        if send_count == 1 and passthrough_active:
+                            print(
+                                f"[AUDIO TX] Passthrough active for {channel_id}")
 
                         # Reset buffer position
                         bundle[buffer_pos_key] = 0
@@ -999,16 +893,11 @@ class UDPPlayer:
             self._transmitting[channel_index] = True
             thread.start()
 
-            # Initialize tone detection thread if enabled
-            if HAS_TONE_DETECT and self._tone_detect_enabled.get(
-                    channel_id, False):
+            # Start tone detection thread
+            if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
                 try:
-                    # Create tone detection buffer
-                    with self._tone_detect_buffer_lock:
-                        self._tone_detect_buffers[channel_id] = np.zeros(
-                            self._tone_detect_buffer_size, dtype=np.float32
-                        )
-                        self._tone_detect_buffer_pos[channel_id] = 0
+                    # Create queue for audio chunks (max 10 chunks buffered)
+                    self._tone_detect_queues[channel_id] = queue.Queue(maxsize=10)
 
                     # Start tone detection worker thread
                     running_flag = threading.Event()
@@ -1024,14 +913,11 @@ class UDPPlayer:
                     self._tone_detect_threads[channel_id] = detect_thread
                     detect_thread.start()
 
-                    print(
-                        f"[TONE DETECT] Started detection thread for channel {channel_id}")
+                    print(f"[TONE DETECT] Started worker thread for {channel_id}")
                 except Exception as e:
-                    print(
-                        f"[TONE DETECT] WARNING: Failed to start detection thread: {e}")
+                    print(f"[TONE DETECT] WARNING: Failed to start thread: {e}")
 
-            print(
-                f"[AUDIO TX] Started transmission for channel {channel_id} (index {channel_index}, device {device_index})")
+            print(f"[AUDIO TX] Started transmission for channel {channel_id} (index {channel_index}, device {device_index})")
             return True
 
     def stop_transmission_for_channel(self, channel_index: int) -> None:
@@ -1041,7 +927,7 @@ class UDPPlayer:
 
         channel_id = self._channel_ids[channel_index]
 
-        # Stop tone detection thread first
+        # Stop tone detection thread
         if HAS_TONE_DETECT and channel_id in self._tone_detect_running:
             try:
                 running_flag = self._tone_detect_running[channel_id]
@@ -1051,19 +937,14 @@ class UDPPlayer:
                 if detect_thread and detect_thread.is_alive():
                     detect_thread.join(timeout=2.0)
 
-                # Cleanup tone detection resources
-                with self._tone_detect_buffer_lock:
-                    self._tone_detect_buffers.pop(channel_id, None)
-                    self._tone_detect_buffer_pos.pop(channel_id, None)
-
+                # Cleanup resources
                 self._tone_detect_running.pop(channel_id, None)
                 self._tone_detect_threads.pop(channel_id, None)
+                self._tone_detect_queues.pop(channel_id, None)
 
-                print(
-                    f"[TONE DETECT] Stopped detection thread for channel {channel_id}")
+                print(f"[TONE DETECT] Stopped thread for {channel_id}")
             except Exception as e:
-                print(
-                    f"[TONE DETECT] WARNING: Error stopping detection thread: {e}")
+                print(f"[TONE DETECT] WARNING: Error stopping thread: {e}")
 
         with self._input_lock:
             if channel_index not in self._input_streams:
@@ -1094,15 +975,13 @@ class UDPPlayer:
 
             # Stop all tone detection threads
             if HAS_TONE_DETECT:
-                for channel_id, running_flag in list(
-                        self._tone_detect_running.items()):
+                for channel_id, running_flag in list(self._tone_detect_running.items()):
                     try:
                         running_flag.clear()
                     except Exception:
                         pass
 
-                for channel_id, detect_thread in list(
-                        self._tone_detect_threads.items()):
+                for channel_id, detect_thread in list(self._tone_detect_threads.items()):
                     try:
                         if detect_thread and detect_thread.is_alive():
                             detect_thread.join(timeout=1.0)
@@ -1111,10 +990,7 @@ class UDPPlayer:
 
                 self._tone_detect_running.clear()
                 self._tone_detect_threads.clear()
-
-                with self._tone_detect_buffer_lock:
-                    self._tone_detect_buffers.clear()
-                    self._tone_detect_buffer_pos.clear()
+                self._tone_detect_queues.clear()
 
             if self._hb_running.is_set():
                 self._hb_running.clear()
