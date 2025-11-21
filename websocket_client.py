@@ -46,21 +46,18 @@ async def connect_to_server_async(url: str) -> bool:
     try:
         print(f"[WEBSOCKET] Connecting to: {url}")
         try:
-            # Disable automatic ping/pong to match C implementation behavior
-            # We rely entirely on application-level keepalive (connect messages every 10s)
-            # This prevents spurious disconnections due to network latency
             global_ws_client = await websockets.connect(
                 url, 
                 subprotocols=["audio-protocol"],
-                ping_interval=None,  # Disable automatic ping
-                ping_timeout=None    # Disable ping timeout checking
+                ping_interval=120,  # Send ping every 2 minutes (very long)
+                ping_timeout=120    # Wait 2 minutes for pong
             )
         except TypeError:
             print("[WEBSOCKET] WARNING: websockets library does not support 'subprotocols' argument, trying without.")
             global_ws_client = await websockets.connect(
                 url,
-                ping_interval=None,
-                ping_timeout=None
+                ping_interval=120,
+                ping_timeout=120
             )
         ws_connected = True
         ws_url = url
