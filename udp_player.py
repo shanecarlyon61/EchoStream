@@ -610,6 +610,9 @@ class UDPPlayer:
                     continue
 
                 chunk_count += 1
+                
+                if chunk_count <= 5 or chunk_count % 100 == 0:
+                    print(f"[TONE DETECT DEBUG] Channel {channel_id}: Received chunk #{chunk_count} from queue")
 
                 # Apply frequency filters (fast operation)
                 if apply_audio_frequency_filters:
@@ -626,6 +629,8 @@ class UDPPlayer:
                 # ALWAYS add samples to buffer (fast operation, just appending to list)
                 if add_audio_samples_for_channel:
                     add_audio_samples_for_channel(channel_id, filtered_audio)
+                    if chunk_count <= 5:
+                        print(f"[TONE DETECT DEBUG] Channel {channel_id}: Added {len(filtered_audio)} samples to buffer")
 
                 # Handle passthrough (in tone detection thread, not broadcasting)
                 if HAS_PASSTHROUGH and global_passthrough_manager:
