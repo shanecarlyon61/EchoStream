@@ -959,28 +959,28 @@ class UDPPlayer:
             thread.start()
 
             # Start tone detection thread
-            # if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
-            #     try:
-            #         print("[TONE DETECT] This is the final step to start tone detectio thread")
-            #         self._tone_detect_queues[channel_id] = queue.Queue(maxsize=10)
+            if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
+                try:
+                    print("[TONE DETECT] This is the final step to start tone detectio thread")
+                    self._tone_detect_queues[channel_id] = queue.Queue(maxsize=10)
 
-            #         # Start tone detection worker thread
-            #         running_flag = threading.Event()
-            #         running_flag.set()
-            #         self._tone_detect_running[channel_id] = running_flag
+                    # Start tone detection worker thread
+                    running_flag = threading.Event()
+                    running_flag.set()
+                    self._tone_detect_running[channel_id] = running_flag
 
-            #         detect_thread = threading.Thread(
-            #             target=self._tone_detection_worker,
-            #             args=(channel_id,),
-            #             daemon=True,
-            #             name=f"ToneDetect-{channel_id}",
-            #         )
-            #         self._tone_detect_threads[channel_id] = detect_thread
-            #         detect_thread.start()
+                    detect_thread = threading.Thread(
+                        target=self._tone_detection_worker,
+                        args=(channel_id,),
+                        daemon=True,
+                        name=f"ToneDetect-{channel_id}",
+                    )
+                    self._tone_detect_threads[channel_id] = detect_thread
+                    detect_thread.start()
 
-            #         print(f"[TONE DETECT] Started worker thread for {channel_id}")
-            #     except Exception as e:
-            #         print(f"[TONE DETECT] WARNING: Failed to start thread: {e}")
+                    print(f"[TONE DETECT] Started worker thread for {channel_id}")
+                except Exception as e:
+                    print(f"[TONE DETECT] WARNING: Failed to start thread: {e}")
 
             print(
                 f"[AUDIO TX] Started transmission for channel {channel_id} (index {channel_index}, device {device_index})"
