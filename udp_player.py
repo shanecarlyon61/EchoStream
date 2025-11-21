@@ -178,7 +178,9 @@ class UDPPlayer:
                         self._config_cache, channel_id)
                     if filters:
                         self._frequency_filters[channel_id] = filters
-                        print(f"[UDP] Loaded {len(filters)} frequency filter(s) for tone detection on channel {channel_id}")
+                        print(
+                            f"[UDP] Loaded {len(filters)} frequency filter(s) "
+                            f"for tone detection on channel {channel_id}")
                     else:
                         self._frequency_filters[channel_id] = []
 
@@ -199,8 +201,8 @@ class UDPPlayer:
                             init_channel_detector(
                                 channel_id, tone_defs, new_tone_cfg, passthrough_cfg)
                             print(
-                                f"[UDP] Initialized tone detection for channel {channel_id} " f"with {
-                                    len(tone_defs)} tone definition(s)")
+                                f"[UDP] Initialized tone detection for channel {channel_id} "
+                                f"with {len(tone_defs)} tone definition(s)")
                         else:
                             print(f"[UDP] WARNING: Tone detection enabled for channel {channel_id} "
                                   f"but no tone definitions found in config.json")
@@ -258,11 +260,11 @@ class UDPPlayer:
         print("[UDP] Receiver thread started")
         print(f"[UDP] Channel IDs configured: {self._channel_ids}")
         print(
-            f"[UDP] AES decryptor: {
-                'READY' if self._aesgcm else 'NOT AVAILABLE'}")
+            f"[UDP] AES decryptor: "
+            f"{'READY' if self._aesgcm else 'NOT AVAILABLE'}")
         print(
-            f"[UDP] Opus decoder: {
-                'READY' if self._opus_decoder else 'NOT AVAILABLE'}")
+            f"[UDP] Opus decoder: "
+            f"{'READY' if self._opus_decoder else 'NOT AVAILABLE'}")
         if self._sock:
             try:
                 local_addr = self._sock.getsockname()
@@ -278,8 +280,8 @@ class UDPPlayer:
             current_time = time.time()
             if current_time - last_log_time >= 10.0:
                 print(
-                    f"[UDP] Still listening... (loop iterations: {loop_count}, packets received: {
-                        self._receive_count})")
+                    f"[UDP] Still listening... (loop iterations: {loop_count}, "
+                    f"packets received: {self._receive_count})")
                 last_log_time = current_time
                 if self._sock:
                     try:
@@ -301,9 +303,8 @@ class UDPPlayer:
                 self._receive_count += 1
                 if self._receive_count <= 10 or self._receive_count % 1000 == 0:
                     print(
-                        f"[UDP] Received {
-                            len(data)} bytes from {addr} (count: {
-                            self._receive_count})")
+                        f"[UDP] Received {len(data)} bytes from {addr} "
+                        f"(count: {self._receive_count})")
 
                 try:
                     msg = json.loads(data.decode("utf-8", errors="ignore"))
@@ -331,14 +332,14 @@ class UDPPlayer:
                 if not ch_id or not b64:
                     if self._receive_count <= 10:
                         print(
-                            f"[UDP] Missing channel_id or data: ch_id='{ch_id}', has_data={
-                                bool(b64)}")
+                            f"[UDP] Missing channel_id or data: ch_id='{ch_id}', "
+                            f"has_data={bool(b64)}")
                     continue
 
                 if self._receive_count <= 10:
                     print(
-                        f"[UDP] Processing audio packet: channel_id='{ch_id}', data_len={
-                            len(b64)}")
+                        f"[UDP] Processing audio packet: channel_id='{ch_id}', "
+                        f"data_len={len(b64)}")
 
                 pcm = self._decrypt_and_decode(b64)
                 if not pcm:
@@ -349,8 +350,8 @@ class UDPPlayer:
 
                 if self._receive_count <= 10:
                     print(
-                        f"[UDP] Successfully decoded {
-                            len(pcm)} bytes PCM for channel '{ch_id}'")
+                        f"[UDP] Successfully decoded {len(pcm)} bytes PCM "
+                        f"for channel '{ch_id}'")
 
                 # Find channel by channel_id (matching C code behavior)
                 target_index = self._map_channel_id_to_index(ch_id)
@@ -435,8 +436,8 @@ class UDPPlayer:
                         try:
                             la = self._sock.getsockname()
                             print(
-                                f"[UDP] HEARTBEAT sent from {la} to {
-                                    self._server_addr}")
+                                f"[UDP] HEARTBEAT sent from {la} to "
+                                f"{self._server_addr}")
                         except Exception:
                             print("[UDP] HEARTBEAT sent")
             except Exception:
@@ -477,8 +478,8 @@ class UDPPlayer:
                             f"[UDP] AES key initialized (using {key_source} key)")
                     else:
                         print(
-                            f"[UDP] WARNING: AES key length invalid: {
-                                len(key)} bytes (expected 32)")
+                            f"[UDP] WARNING: AES key length invalid: "
+                            f"{len(key)} bytes (expected 32)")
                         self._aesgcm = None
                         self._aes_key = None
                 except Exception as e:
@@ -648,8 +649,8 @@ class UDPPlayer:
 
                 if process_count <= 5 or process_count % 20 == 0:
                     print(
-                        f"[TONE DETECT] Processing {
-                            len(new_samples)} new samples for channel {channel_id} (total: {buffer_pos})")
+                        f"[TONE DETECT] Processing {len(new_samples)} new samples "
+                        f"for channel {channel_id} (total: {buffer_pos})")
 
                 # Apply filtering (outside lock to avoid blocking transmission)
                 if apply_audio_frequency_filters:
@@ -660,8 +661,8 @@ class UDPPlayer:
                         )
                         if process_count <= 3:
                             print(
-                                f"[TONE DETECT] Applied {
-                                    len(filters)} filter(s) to audio")
+                                f"[TONE DETECT] Applied {len(filters)} "
+                                f"filter(s) to audio")
                     else:
                         filtered_audio = new_samples
                 else:
@@ -677,10 +678,8 @@ class UDPPlayer:
                         print(
                             f"\n[TONE DETECT] *** TONE SEQUENCE DETECTED ON CHANNEL {channel_id} ***")
                         print(
-                            f"[TONE DETECT] Tone ID: {
-                                detected_tone.get(
-                                    'tone_id',
-                                    'unknown')}\n")
+                            f"[TONE DETECT] Tone ID: "
+                            f"{detected_tone.get('tone_id', 'unknown')}\n")
                 else:
                     if process_count == 1:
                         print(
@@ -723,10 +722,8 @@ class UDPPlayer:
             print(
                 f"[AUDIO TX] Worker started for channel {channel_id} (index {channel_index})")
             print(
-                f"[AUDIO TX] Transmission flag: {
-                    self._transmitting.get(
-                        channel_index,
-                        False)}")
+                f"[AUDIO TX] Transmission flag: "
+                f"{self._transmitting.get(channel_index, False)}")
             print(f"[AUDIO TX] Running flag: {self._running.is_set()}")
 
         while self._running.is_set() and self._transmitting.get(channel_index, False):
@@ -816,9 +813,9 @@ class UDPPlayer:
                                         else:
                                             if send_count <= 10:
                                                 print(
-                                                    f"[AUDIO TX ERROR] Channel {channel_id}: Cannot send - sock={
-                                                        self._sock is not None}, addr={
-                                                        self._server_addr}")
+                                                    f"[AUDIO TX ERROR] Channel {channel_id}: "
+                                                    f"Cannot send - sock={self._sock is not None}, "
+                                                    f"addr={self._server_addr}")
                                     except Exception as e:
                                         if send_count <= 10:
                                             print(
@@ -859,8 +856,8 @@ class UDPPlayer:
                                                 samples_to_add
                                             if send_count <= 5 or send_count % 500 == 0:
                                                 print(
-                                                    f"[AUDIO TX] Copied {samples_to_add} samples to tone buffer (pos: {tone_pos} -> {
-                                                        tone_pos + samples_to_add})")
+                                                    f"[AUDIO TX] Copied {samples_to_add} samples to tone buffer "
+                                                    f"(pos: {tone_pos} -> {tone_pos + samples_to_add})")
                                         else:
                                             # Buffer full, shift left
                                             shift_amount = samples_to_add
