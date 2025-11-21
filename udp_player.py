@@ -622,14 +622,21 @@ class UDPPlayer:
 
                 # Process tone detection
                 if process_audio_for_channel:
-                    detected_tone = process_audio_for_channel(
-                        channel_id, filtered_audio
-                    )
-                    if detected_tone:
-                        print(f"\n[TONE DETECT] *** TONE DETECTED ON {channel_id} ***")
-                        print(
-                            f"[TONE DETECT] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n"
+                    if process_count <= 5 or process_count % 100 == 0:
+                        print(f"[TONE DETECT DEBUG] Channel {channel_id}: Processing audio (process_count={process_count})")
+                    try:
+                        detected_tone = process_audio_for_channel(
+                            channel_id, filtered_audio
                         )
+                        if detected_tone:
+                            print(f"\n[TONE DETECT] *** TONE DETECTED ON {channel_id} ***")
+                            print(
+                                f"[TONE DETECT] Tone ID: {detected_tone.get('tone_id', 'unknown')}\n"
+                            )
+                    except Exception as tone_err:
+                        print(f"[TONE DETECT] ERROR in process_audio_for_channel for {channel_id}: {tone_err}")
+                        import traceback
+                        traceback.print_exc()
 
                 # Handle passthrough (in tone detection thread, not broadcasting)
                 if HAS_PASSTHROUGH and global_passthrough_manager:
@@ -705,6 +712,7 @@ class UDPPlayer:
             )
             print(f"[AUDIO TX] Running flag: {self._running.is_set()}")
 
+        loop_exit_reason = "unknown"
         while self._running.is_set() and self._transmitting.get(channel_index, False):
             try:
                 from gpio_monitor import GPIO_PINS, gpio_states
@@ -814,18 +822,33 @@ class UDPPlayer:
                             if tone_queue:
                                 try:
                                     tone_queue.put_nowait(audio_chunk)
+                                    if send_count <= 10 or send_count % 1000 == 0:
+                                        print(f"[AUDIO TX DEBUG] Channel {channel_id}: Put audio chunk in tone queue (send_count={send_count}, qsize={tone_queue.qsize()})")
                                 except queue.Full:
+                                    if send_count <= 10 or send_count % 100 == 0:
+                                        print(f"[AUDIO TX DEBUG] Channel {channel_id}: Tone queue FULL, skipping (send_count={send_count})")
                                     pass
 
                         bundle[buffer_pos_key] = 0
             except Exception as e:
                 if not self._running.is_set():
+                    loop_exit_reason = "_running is False after exception"
                     break
                 if send_count % 100 == 0:
                     print(f"[AUDIO TX] Input error for {channel_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
                 time.sleep(0.1)
 
+        # Check why loop exited
+        if not self._running.is_set():
+            loop_exit_reason = "_running is False"
+        elif not self._transmitting.get(channel_index, False):
+            loop_exit_reason = "_transmitting is False"
+        
         print(f"[AUDIO TX] Input worker stopped for channel {channel_id}")
+        print(f"[AUDIO TX] Loop exit reason: {loop_exit_reason}")
+        print(f"[AUDIO TX] Final state - running: {self._running.is_set()}, transmitting: {self._transmitting.get(channel_index, False)}, send_count: {send_count}")
 
     def start_transmission_for_channel(self, channel_index: int) -> bool:
         if channel_index < 0 or channel_index >= len(self._channel_ids):
@@ -941,6 +964,9 @@ class UDPPlayer:
             return
 
         channel_id = self._channel_ids[channel_index]
+        print(f"[AUDIO TX DEBUG] stop_transmission_for_channel called for {channel_id} (index {channel_index})")
+        import traceback
+        traceback.print_stack()
 
         # Stop tone detection thread
         if HAS_TONE_DETECT and channel_id in self._tone_detect_running:

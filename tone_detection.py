@@ -475,20 +475,20 @@ class ChannelToneDetector:
                 publish_new_tone_pair(tone_a_freq, tone_b_freq)
 
             # Trigger recording
-            try:
-                from recording import global_recording_manager
+            # try:
+            #     from recording import global_recording_manager
 
-                new_tone_length_ms = self.new_tone_config.get("new_tone_length_ms", 0)
-                if new_tone_length_ms > 0:
-                    global_recording_manager.start_recording(
-                        self.channel_id,
-                        "new",
-                        tone_a_freq,
-                        tone_b_freq,
-                        new_tone_length_ms,
-                    )
-            except Exception as e:
-                print(f"[RECORDING] ERROR: Failed to start new tone " f"recording: {e}")
+            #     new_tone_length_ms = self.new_tone_config.get("new_tone_length_ms", 0)
+            #     if new_tone_length_ms > 0:
+            #         global_recording_manager.start_recording(
+            #             self.channel_id,
+            #             "new",
+            #             tone_a_freq,
+            #             tone_b_freq,
+            #             new_tone_length_ms,
+            #         )
+            # except Exception as e:
+            #     print(f"[RECORDING] ERROR: Failed to start new tone " f"recording: {e}")
 
             return True
 
