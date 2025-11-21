@@ -194,7 +194,7 @@ def get_new_tone_config(cfg: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
                     alert_details.get("detect_new_tones", False)
                 )
                 result["new_tone_length_ms"] = int(
-                    alert_details.get("new_tone_length", 1000)
+                    alert_details.get("new_tone_length", 1.0) * 1000
                 )
                 result["new_tone_range_hz"] = int(
                     alert_details.get("new_tone_range", 3)
