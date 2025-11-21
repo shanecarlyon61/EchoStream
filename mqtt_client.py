@@ -341,10 +341,7 @@ def mqtt_publish(topic: str, payload: str) -> bool:
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
                 return True
             else:
-                print(
-                    f"[MQTT] ERROR: Failed to publish to '{topic}' (rc={
-                        result.rc})"
-                )
+                print(f"[MQTT] ERROR: Failed to publish to '{topic}' (rc={result.rc})")
                 return False
         except Exception as e:
             print(f"[MQTT] ERROR: Exception during publish: {e}")
