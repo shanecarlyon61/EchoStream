@@ -35,8 +35,8 @@ MAX_BUFFER_SECONDS = 10
 MAX_BUFFER_SAMPLES = int(SAMPLE_RATE * MAX_BUFFER_SECONDS)
 # Minimum time between detections (to avoid duplicates)
 MIN_DETECTION_INTERVAL_SECONDS = 2.0
-# Duration tolerance for tone detection (allows ±50ms variation)
-DURATION_TOLERANCE_MS = 50
+# Duration tolerance for tone detection (allows ±80ms variation)
+DURATION_TOLERANCE_MS = 80
 
 
 def parabolic(f, x):
@@ -53,18 +53,107 @@ def parabolic(f, x):
         return float(x), float(f[x])
 
 
-def freq_from_fft(sig: np.ndarray, fs: int = SAMPLE_RATE) -> List[float]:
+def calculate_peak_prominence(
+    magnitudes: np.ndarray, peak_idx: int, window_size: int = 5
+) -> float:
     """
-    Estimate frequency peaks from FFT where magnitudes are above threshold.
-    Returns list of frequency peaks. If 2+ peaks are returned, the signal
-    doesn't have a pair of tones.
+    Calculate peak prominence - the height difference between the peak
+    and the higher of the two surrounding valleys.
+
+    Args:
+        magnitudes: Magnitude array
+        peak_idx: Index of the peak
+        window_size: Size of window to search for valleys on each side
+
+    Returns:
+        Prominence value (magnitude difference)
+    """
+    peak_mag = magnitudes[peak_idx]
+
+    # Find minimum on left side (valley)
+    left_start = max(0, peak_idx - window_size)
+    left_valley = (
+        np.min(magnitudes[left_start:peak_idx]) if peak_idx > 0 else peak_mag
+    )
+
+    # Find minimum on right side (valley)
+    right_end = min(len(magnitudes), peak_idx + window_size + 1)
+    right_valley = (
+        np.min(magnitudes[peak_idx + 1 : right_end])
+        if peak_idx < len(magnitudes) - 1
+        else peak_mag
+    )
+
+    # Prominence is the difference between peak and the higher valley
+    prominence = peak_mag - max(left_valley, right_valley)
+
+    return prominence
+
+
+def calculate_peak_width(
+    magnitudes: np.ndarray, peak_idx: int, prominence_fraction: float = 0.5
+) -> int:
+    """
+    Calculate peak width at a fraction of prominence.
+
+    Args:
+        magnitudes: Magnitude array
+        peak_idx: Index of the peak
+        prominence_fraction: Fraction of prominence to measure width at
+                            (default 0.5 = half-height)
+
+    Returns:
+        Width in bins
+    """
+    peak_mag = magnitudes[peak_idx]
+    prominence = calculate_peak_prominence(magnitudes, peak_idx)
+    threshold = peak_mag - (prominence * prominence_fraction)
+
+    # Find left edge
+    left_edge = peak_idx
+    for i in range(peak_idx - 1, -1, -1):
+        if magnitudes[i] < threshold:
+            left_edge = i + 1
+            break
+    else:
+        left_edge = 0
+
+    # Find right edge
+    right_edge = peak_idx
+    for i in range(peak_idx + 1, len(magnitudes)):
+        if magnitudes[i] < threshold:
+            right_edge = i - 1
+            break
+    else:
+        right_edge = len(magnitudes) - 1
+
+    return right_edge - left_edge + 1
+
+
+def freq_from_fft(
+    sig: np.ndarray,
+    fs: int = SAMPLE_RATE,
+    magnitude_threshold: float = 500.0,
+    min_prominence_ratio: float = 0.3,
+    max_width_bins: int = 20,
+    min_separation_hz: float = 20.0,
+) -> List[float]:
+    """
+    Estimate frequency peaks from FFT with improved peak detection.
+    Uses prominence, width validation, and minimum separation.
 
     Args:
         sig: Audio signal samples
         fs: Sample rate (default: 48000)
+        magnitude_threshold: Minimum magnitude to consider (default: 500.0)
+        min_prominence_ratio: Minimum prominence as ratio of peak magnitude
+                            (default: 0.3 = 30%)
+        max_width_bins: Maximum peak width in FFT bins (default: 20)
+        min_separation_hz: Minimum frequency separation between peaks in Hz
+                          (default: 20.0)
 
     Returns:
-        List of detected frequency peaks in Hz (where magnitude > 300)
+        List of detected frequency peaks in Hz (sorted by magnitude, descending)
     """
     if len(sig) == 0:
         return []
@@ -78,21 +167,75 @@ def freq_from_fft(sig: np.ndarray, fs: int = SAMPLE_RATE) -> List[float]:
     if np.max(magnitudes) == 0:
         return []
 
-    # Find all peaks with magnitude > 300
-    peaks = []
-    magnitude_threshold = 200.0
-
-    # Find local maxima above threshold
+    # Find all local maxima above threshold
+    candidate_peaks = []
     for i in range(1, len(magnitudes) - 1):
         if (
             magnitudes[i] > magnitude_threshold
             and magnitudes[i] > magnitudes[i - 1]
             and magnitudes[i] > magnitudes[i + 1]
         ):
-            # Interpolate to get more accurate peak position
-            true_i = parabolic(np.log(magnitudes + 1e-10), i)[0]
-            peak_freq = fs * true_i / len(windowed)
-            peaks.append(peak_freq)
+            candidate_peaks.append(i)
+
+    if len(candidate_peaks) == 0:
+        return []
+
+    # Calculate prominence and width for each candidate peak
+    peak_data = []
+    for peak_idx in candidate_peaks:
+        prominence = calculate_peak_prominence(magnitudes, peak_idx)
+        width = calculate_peak_width(magnitudes, peak_idx)
+        peak_mag = magnitudes[peak_idx]
+
+        # Check prominence requirement (must be at least
+        # min_prominence_ratio of peak magnitude)
+        min_prominence = peak_mag * min_prominence_ratio
+        if prominence < min_prominence:
+            continue
+
+        # Check width requirement (peaks shouldn't be too wide)
+        if width > max_width_bins:
+            continue
+
+        # Interpolate to get more accurate peak position
+        true_i = parabolic(np.log(magnitudes + 1e-10), peak_idx)[0]
+        peak_freq = fs * true_i / len(windowed)
+
+        peak_data.append(
+            {
+                "index": peak_idx,
+                "freq": peak_freq,
+                "magnitude": peak_mag,
+                "prominence": prominence,
+                "width": width,
+            }
+        )
+
+    if len(peak_data) == 0:
+        return []
+
+    # Sort by magnitude (strongest first)
+    peak_data.sort(key=lambda x: x["magnitude"], reverse=True)
+
+    # Apply minimum separation filter
+    # Keep strongest peaks, but remove peaks that are too close to stronger ones
+    filtered_peaks = []
+    min_separation_bins = int((min_separation_hz * len(windowed)) / fs)
+
+    for peak in peak_data:
+        # Check if this peak is far enough from all already accepted peaks
+        too_close = False
+        for accepted_peak in filtered_peaks:
+            bin_separation = abs(peak["index"] - accepted_peak["index"])
+            if bin_separation < min_separation_bins:
+                too_close = True
+                break
+
+        if not too_close:
+            filtered_peaks.append(peak)
+
+    # Extract frequencies
+    peaks = [p["freq"] for p in filtered_peaks]
 
     return peaks
 
@@ -254,6 +397,14 @@ class ChannelToneDetector:
         # Store last detected pair for external access (doesn't get reset)
         self.last_detected_new_pair: Optional[Dict[str, Any]] = None
 
+        # Frequency stability tracking
+        # Track recent frequency detections for stability verification
+        self.frequency_history: Dict[str, List[Dict[str, Any]]] = {}
+        # Configuration for stability checking
+        self.stability_required_count = 3  # Number of consistent detections required
+        self.stability_tolerance_hz = 5.0  # Frequency tolerance for stability (Hz)
+        self.stability_max_age_seconds = 1.0  # Maximum age of history entries (seconds)
+
     def add_audio_samples(self, samples: np.ndarray):
         """
         Add filtered audio samples to the buffer.
@@ -283,6 +434,51 @@ class ChannelToneDetector:
             buffer_copy = list(self.audio_buffer)  # Fast shallow copy
         # Convert to numpy array outside mutex to avoid blocking
         return np.array(buffer_copy, dtype=np.float32)
+
+    def _check_frequency_stability(
+        self, frequency: float, window_id: str, current_time: float
+    ) -> bool:
+        """
+        Check if a frequency is stable across multiple windows.
+
+        Args:
+            frequency: Detected frequency in Hz
+            window_id: Identifier for the window (e.g., "tone_a", "tone_b")
+            current_time: Current timestamp
+
+        Returns:
+            True if frequency is stable (has required number of consistent detections)
+        """
+        # Initialize history for this window if needed
+        if window_id not in self.frequency_history:
+            self.frequency_history[window_id] = []
+
+        history = self.frequency_history[window_id]
+
+        # Remove old entries (older than max_age)
+        history[:] = [
+            entry
+            for entry in history
+            if (current_time - entry["time"]) <= self.stability_max_age_seconds
+        ]
+
+        # Add current detection
+        history.append({"freq": frequency, "time": current_time})
+
+        # If we don't have enough detections yet, return False
+        if len(history) < self.stability_required_count:
+            return False
+
+        # Check if recent detections are consistent
+        recent_detections = history[-self.stability_required_count :]
+        frequencies = [d["freq"] for d in recent_detections]
+
+        # Calculate mean and check if all are within tolerance
+        mean_freq = np.mean(frequencies)
+        max_deviation = max(abs(f - mean_freq) for f in frequencies)
+
+        # Frequency is stable if all recent detections are within tolerance
+        return max_deviation <= self.stability_tolerance_hz
 
     def _is_frequency_filtered(self, frequency: float) -> bool:
         """
@@ -395,6 +591,20 @@ class ChannelToneDetector:
 
             tone_b_freq = tone_b_peaks[0]
 
+            # Check frequency stability across multiple windows
+            window_id_a = f"{tone_id}_tone_a"
+            window_id_b = f"{tone_id}_tone_b"
+            tone_a_stable = self._check_frequency_stability(
+                tone_a_freq, window_id_a, current_time
+            )
+            tone_b_stable = self._check_frequency_stability(
+                tone_b_freq, window_id_b, current_time
+            )
+
+            # Require both frequencies to be stable before accepting
+            if not (tone_a_stable and tone_b_stable):
+                return False
+
             # Check if detected frequencies are within filter config ranges
             if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
                 return False
@@ -421,6 +631,12 @@ class ChannelToneDetector:
             if tone_a_match and tone_b_match and tone_a_duration_match and tone_b_duration_match:
                 # Valid tone sequence detected!
                 self.last_detection_time[tone_id] = current_time
+
+                # Clear frequency history for this tone to avoid stale data
+                window_id_a = f"{tone_id}_tone_a"
+                window_id_b = f"{tone_id}_tone_b"
+                self.frequency_history.pop(window_id_a, None)
+                self.frequency_history.pop(window_id_b, None)
 
                 confirmation_log = (
                     "\n"
@@ -602,6 +818,20 @@ class ChannelToneDetector:
 
             tone_b_freq = tone_b_peaks[0]
 
+            # Check frequency stability across multiple windows
+            window_id_a = "new_tone_a"
+            window_id_b = "new_tone_b"
+            tone_a_stable = self._check_frequency_stability(
+                tone_a_freq, window_id_a, current_time
+            )
+            tone_b_stable = self._check_frequency_stability(
+                tone_b_freq, window_id_b, current_time
+            )
+
+            # Require both frequencies to be stable before accepting
+            if not (tone_a_stable and tone_b_stable):
+                return False
+
             # Check if detected frequencies are within filter config ranges
             if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
                 return False
@@ -673,6 +903,10 @@ class ChannelToneDetector:
             # Valid new tone pair detected!
             self.last_new_tone_detection_time = current_time
             self.new_tone_pair_count = 0
+
+            # Clear frequency history for new tones to avoid stale data
+            self.frequency_history.pop("new_tone_a", None)
+            self.frequency_history.pop("new_tone_b", None)
             
             # Store detected frequencies for external access (before reset)
             self.last_detected_new_pair = {
