@@ -35,6 +35,8 @@ MAX_BUFFER_SECONDS = 10
 MAX_BUFFER_SAMPLES = int(SAMPLE_RATE * MAX_BUFFER_SECONDS)
 # Minimum time between detections (to avoid duplicates)
 MIN_DETECTION_INTERVAL_SECONDS = 2.0
+# Duration tolerance for tone detection (allows ±50ms variation)
+DURATION_TOLERANCE_MS = 50
 
 
 def parabolic(f, x):
@@ -51,35 +53,48 @@ def parabolic(f, x):
         return float(x), float(f[x])
 
 
-def freq_from_fft(sig: np.ndarray, fs: int = SAMPLE_RATE) -> float:
+def freq_from_fft(sig: np.ndarray, fs: int = SAMPLE_RATE) -> List[float]:
     """
-    Estimate frequency from peak of FFT.
-    Similar to reference implementation in ToneDetect/utils/tone.py
+    Estimate frequency peaks from FFT where magnitudes are above threshold.
+    Returns list of frequency peaks. If 2+ peaks are returned, the signal
+    doesn't have a pair of tones.
 
     Args:
         sig: Audio signal samples
         fs: Sample rate (default: 48000)
 
     Returns:
-        Detected frequency in Hz
+        List of detected frequency peaks in Hz (where magnitude > 300)
     """
     if len(sig) == 0:
-        return 0.0
+        return []
 
     # Compute Fourier transform of windowed signal
     windowed = sig * hanning(len(sig))
     f = rfft(windowed)
 
-    # Find the peak and interpolate to get a more accurate peak
+    # Find peaks with magnitude above threshold
     magnitudes = np.abs(f)
     if np.max(magnitudes) == 0:
-        return 0.0
+        return []
 
-    i = np.argmax(magnitudes)
-    true_i = parabolic(np.log(magnitudes + 1e-10), i)[0]
+    # Find all peaks with magnitude > 300
+    peaks = []
+    magnitude_threshold = 200.0
 
-    # Convert to equivalent frequency
-    return fs * true_i / len(windowed)
+    # Find local maxima above threshold
+    for i in range(1, len(magnitudes) - 1):
+        if (
+            magnitudes[i] > magnitude_threshold
+            and magnitudes[i] > magnitudes[i - 1]
+            and magnitudes[i] > magnitudes[i + 1]
+        ):
+            # Interpolate to get more accurate peak position
+            true_i = parabolic(np.log(magnitudes + 1e-10), i)[0]
+            peak_freq = fs * true_i / len(windowed)
+            peaks.append(peak_freq)
+
+    return peaks
 
 
 def is_frequency_in_range(
@@ -187,11 +202,15 @@ class ChannelToneDetector:
         tone_definitions: List[Dict[str, Any]],
         new_tone_config: Optional[Dict[str, Any]] = None,
         passthrough_config: Optional[Dict[str, Any]] = None,
+        frequency_filters: Optional[List[Dict[str, Any]]] = None,
     ):
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
         self.audio_buffer: List[float] = []
         self.mutex = threading.Lock()
+
+        # Store frequency filters for validation
+        self.frequency_filters = frequency_filters or []
 
         # New tone detection configuration
         if new_tone_config is None:
@@ -204,6 +223,14 @@ class ChannelToneDetector:
         self.new_tone_length_ms = new_tone_config.get("new_tone_length_ms", 1000)
         self.new_tone_length_seconds = self.new_tone_length_ms / 1000.0
         self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
+        # Duration tolerance for new tone detection (allows ±50ms by default)
+        # This handles cases where tone duration is 0.98s instead of 1.0s
+        self.new_tone_length_tolerance_ms = new_tone_config.get(
+            "new_tone_length_tolerance_ms", 50
+        )
+        self.new_tone_length_tolerance_seconds = (
+            self.new_tone_length_tolerance_ms / 1000.0
+        )
         # Hardcoded to 3 consecutive detections (strikes)
         self.new_tone_consecutive_required = 3
         self.new_tone_config = new_tone_config
@@ -224,6 +251,8 @@ class ChannelToneDetector:
         # For consistency check (like reference: 3 consecutive)
         self.new_tone_pair_count = 0
         self.last_new_tone_pair: Optional[Dict[str, Any]] = None
+        # Store last detected pair for external access (doesn't get reset)
+        self.last_detected_new_pair: Optional[Dict[str, Any]] = None
 
     def add_audio_samples(self, samples: np.ndarray):
         """
@@ -242,7 +271,7 @@ class ChannelToneDetector:
                 # Large arrays: convert in chunks to avoid blocking
                 chunk_size = 5000
                 for i in range(0, len(samples), chunk_size):
-                    chunk = samples[i : i + chunk_size]
+                    chunk = samples[i:i + chunk_size]
                     self.audio_buffer.extend(chunk.tolist())
             if len(self.audio_buffer) > MAX_BUFFER_SAMPLES:
                 self.audio_buffer = self.audio_buffer[-MAX_BUFFER_SAMPLES:]
@@ -254,6 +283,34 @@ class ChannelToneDetector:
             buffer_copy = list(self.audio_buffer)  # Fast shallow copy
         # Convert to numpy array outside mutex to avoid blocking
         return np.array(buffer_copy, dtype=np.float32)
+
+    def _is_frequency_filtered(self, frequency: float) -> bool:
+        """
+        Check if a detected frequency falls within any configured filter range.
+
+        Args:
+            frequency: Detected frequency in Hz
+
+        Returns:
+            True if frequency is filtered out (should reject), False otherwise
+        """
+        if not self.frequency_filters:
+            return False
+
+        for filter_data in self.frequency_filters:
+            filter_freq = filter_data.get("frequency", 0.0)
+            filter_type = filter_data.get("type", "")
+
+            if filter_type == "below":
+                # Filter frequencies below the threshold
+                if frequency < filter_freq:
+                    return True
+            elif filter_type == "above":
+                # Filter frequencies above the threshold
+                if frequency > filter_freq:
+                    return True
+
+        return False
 
     def _detect_defined_tone(self, tone_def: Dict[str, Any]) -> bool:
         """
@@ -297,8 +354,8 @@ class ChannelToneDetector:
         if random.randint(1, 50) == 1:
             print(f"[TONE DETECT] Channel {self.channel_id}: Volume={volume_db:.1f} dB (threshold=-20dB)")
         
-        if volume_db < -20:  # -20dB threshold (like reference project)
-            return False
+        # if volume_db < -20:  # -20dB threshold (like reference project)
+        #     return False
 
         # Check minimum time since last detection (avoid duplicates)
         tone_id = tone_def["tone_id"]
@@ -312,22 +369,34 @@ class ChannelToneDetector:
             # Analyze Tone A window: [0:tone_a_samples]
             # (recent_samples already contains the last total_samples)
             tone_a_window = recent_samples[0:tone_a_samples]
-            tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
+            tone_a_peaks = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
-            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
-            tone_a_peaks = count_significant_peaks(tone_a_window, SAMPLE_RATE)
-            if tone_a_peaks >= 3:
-                # Voice detected in Tone A window, reject
+            # If 2+ peaks detected, signal doesn't have a pair of tones - reject
+            if len(tone_a_peaks) >= 2:
                 return False
+
+            # If no peaks found, reject
+            if len(tone_a_peaks) == 0:
+                return False
+
+            tone_a_freq = tone_a_peaks[0]
 
             # Analyze Tone B window: [tone_a_samples:]
             tone_b_window = recent_samples[tone_a_samples:]
-            tone_b_freq = freq_from_fft(tone_b_window, SAMPLE_RATE)
+            tone_b_peaks = freq_from_fft(tone_b_window, SAMPLE_RATE)
 
-            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
-            tone_b_peaks = count_significant_peaks(tone_b_window, SAMPLE_RATE)
-            if tone_b_peaks >= 3:
-                # Voice detected in Tone B window, reject
+            # If 2+ peaks detected, signal doesn't have a pair of tones - reject
+            if len(tone_b_peaks) >= 2:
+                return False
+
+            # If no peaks found, reject
+            if len(tone_b_peaks) == 0:
+                return False
+
+            tone_b_freq = tone_b_peaks[0]
+
+            # Check if detected frequencies are within filter config ranges
+            if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
                 return False
 
             # Debug: Log detected frequencies periodically
@@ -343,7 +412,13 @@ class ChannelToneDetector:
                 tone_b_freq, tone_def["tone_b"], tone_def.get("tone_b_range", 10)
             )
 
-            if tone_a_match and tone_b_match:
+            # Check if durations match within tolerance (50ms)
+            detected_tone_a_duration_ms = (tone_a_samples / SAMPLE_RATE) * 1000.0
+            detected_tone_b_duration_ms = (tone_b_samples / SAMPLE_RATE) * 1000.0
+            tone_a_duration_match = abs(detected_tone_a_duration_ms - tone_def["tone_a_length_ms"]) <= DURATION_TOLERANCE_MS
+            tone_b_duration_match = abs(detected_tone_b_duration_ms - tone_def["tone_b_length_ms"]) <= DURATION_TOLERANCE_MS
+
+            if tone_a_match and tone_b_match and tone_a_duration_match and tone_b_duration_match:
                 # Valid tone sequence detected!
                 self.last_detection_time[tone_id] = current_time
 
@@ -361,16 +436,18 @@ class ChannelToneDetector:
                     + "  Tone A Details:\n"
                     + f"    Detected:     {tone_a_freq:.1f} Hz\n"
                     + f"    Target:       {tone_def['tone_a']:.1f} Hz "
-                    f"±{tone_def.get('tone_a_range', 10)} Hz\n" + f"    Duration:     "
-                    f"{tone_a_length_seconds:.2f} s "
-                    f"({tone_def['tone_a_length_ms']} ms)\n"
+                    f"±{tone_def.get('tone_a_range', 10)} Hz\n"
+                    + f"    Duration:     {detected_tone_a_duration_ms:.1f} ms "
+                    f"(target: {tone_def['tone_a_length_ms']} ms, "
+                    f"tolerance: ±{DURATION_TOLERANCE_MS} ms)\n"
                     + "  \n"
                     + "  Tone B Details:\n"
                     + f"    Detected:     {tone_b_freq:.1f} Hz\n"
                     + f"    Target:       {tone_def['tone_b']:.1f} Hz "
-                    f"±{tone_def.get('tone_b_range', 10)} Hz\n" + f"    Duration:     "
-                    f"{tone_b_length_seconds:.2f} s "
-                    f"({tone_def['tone_b_length_ms']} ms)\n"
+                    f"±{tone_def.get('tone_b_range', 10)} Hz\n"
+                    + f"    Duration:     {detected_tone_b_duration_ms:.1f} ms "
+                    f"(target: {tone_def['tone_b_length_ms']} ms, "
+                    f"tolerance: ±{DURATION_TOLERANCE_MS} ms)\n"
                     + "  \n"
                     + "  Record Length:  "
                     f"{tone_def.get('record_length_ms', 0)} ms\n"
@@ -448,8 +525,11 @@ class ChannelToneDetector:
 
     def _detect_new_tone_pair(self) -> bool:
         """
-        Detect new tone pairs using new_tone_length windows.
+        Detect new tone pairs using new_tone_length windows with tolerance.
         Similar to reference implementation: analyzes pairs of windows.
+        
+        Uses duration tolerance to detect tones that are close to the
+        expected duration (e.g., 0.98s instead of 1.0s).
 
         Returns:
             True if new tone pair detected, False otherwise
@@ -457,9 +537,13 @@ class ChannelToneDetector:
         if not self.detect_new_tones:
             return False
 
-        # Calculate required samples for new tone length
-        new_tone_samples = int(self.new_tone_length_seconds * SAMPLE_RATE)
-        total_samples = 2 * new_tone_samples  # Need 2 tones worth
+        # Calculate required samples with tolerance
+        # Use the maximum duration for buffer check to ensure we have enough samples
+        max_tone_duration = (
+            self.new_tone_length_seconds + self.new_tone_length_tolerance_seconds
+        )
+        max_tone_samples = int(max_tone_duration * SAMPLE_RATE)
+        total_samples = 2 * max_tone_samples  # Need 2 tones worth
 
         # OPTIMIZATION 1: Quick buffer size check BEFORE expensive conversion
         with self.mutex:
@@ -481,34 +565,52 @@ class ChannelToneDetector:
         
         # Convert only the recent samples we need (not entire 480k buffer)
         recent_samples = np.array(recent_samples_list, dtype=np.float32)
-        volume_db = calculate_rms_volume(recent_samples)
         
-        if volume_db < -20:  # -20dB threshold (like reference project)
-            return False
+        # Volume check removed - handled by frequency filters
 
         # OPTIMIZATION 3: Use already-converted recent_samples array (no duplicate conversion)
         try:
-            # Analyze Tone A window: [0:new_tone_samples]
+            # Try detecting with target duration (center of tolerance range)
+            target_tone_samples = int(self.new_tone_length_seconds * SAMPLE_RATE)
+            
+            # Analyze Tone A window: [0:target_tone_samples]
             # (recent_samples already contains the last total_samples)
-            tone_a_window = recent_samples[0:new_tone_samples]
-            tone_a_freq = freq_from_fft(tone_a_window, SAMPLE_RATE)
+            tone_a_window = recent_samples[0:target_tone_samples]
+            tone_a_peaks = freq_from_fft(tone_a_window, SAMPLE_RATE)
 
-            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
-            tone_a_peaks = count_significant_peaks(tone_a_window, SAMPLE_RATE)
-            if tone_a_peaks >= 3:
-                # Voice detected in Tone A window, reject
+            # If 2+ peaks detected, signal doesn't have a pair of tones - reject
+            if len(tone_a_peaks) >= 2:
                 return False
 
-            # Analyze Tone B window: [new_tone_samples:]
-            tone_b_window = recent_samples[new_tone_samples:]
-            tone_b_freq = freq_from_fft(tone_b_window, SAMPLE_RATE)
-
-            # Voice rejection: Count frequency peaks (voice has 3+ peaks, tones have ≤2)
-            tone_b_peaks = count_significant_peaks(tone_b_window, SAMPLE_RATE)
-            if tone_b_peaks >= 3:
-                # Voice detected in Tone B window, reject
+            # If no peaks found, reject
+            if len(tone_a_peaks) == 0:
                 return False
 
+            tone_a_freq = tone_a_peaks[0]
+
+            # Analyze Tone B window: [target_tone_samples:]
+            tone_b_window = recent_samples[target_tone_samples:]
+            tone_b_peaks = freq_from_fft(tone_b_window, SAMPLE_RATE)
+
+            # If 2+ peaks detected, signal doesn't have a pair of tones - reject
+            if len(tone_b_peaks) >= 2:
+                return False
+
+            # If no peaks found, reject
+            if len(tone_b_peaks) == 0:
+                return False
+
+            tone_b_freq = tone_b_peaks[0]
+
+            # Check if detected frequencies are within filter config ranges
+            if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
+                return False
+
+            # Voice rejection: Tones must be different
+            # (like reference: >50 Hz difference)
+            if abs(tone_a_freq - tone_b_freq) <= 50:
+                return False
+                
             # Voice rejection: Check if frequencies match any
             # defined tone
             is_known_tone = False
@@ -541,10 +643,6 @@ class ChannelToneDetector:
             if is_known_tone:
                 return False
 
-            # Voice rejection: Tones must be different
-            # (like reference: >50 Hz difference)
-            if abs(tone_a_freq - tone_b_freq) <= 50:
-                return False
 
             # OPTIMIZATION 4: Removed expensive stability checks (2 extra FFTs)
             # Instead, rely on 3 consecutive detections (like reference project)
@@ -575,6 +673,15 @@ class ChannelToneDetector:
             # Valid new tone pair detected!
             self.last_new_tone_detection_time = current_time
             self.new_tone_pair_count = 0
+            
+            # Store detected frequencies for external access (before reset)
+            self.last_detected_new_pair = {
+                "tone_a": tone_a_freq,
+                "tone_b": tone_b_freq,
+                "tone_a_length_ms": int(self.new_tone_length_seconds * 1000),
+                "tone_b_length_ms": int(self.new_tone_length_seconds * 1000),
+            }
+            
             self.last_new_tone_pair = None
 
             print(
@@ -647,6 +754,7 @@ def init_channel_detector(
     tone_definitions: List[Dict[str, Any]],
     new_tone_config: Optional[Dict[str, Any]] = None,
     passthrough_config: Optional[Dict[str, Any]] = None,
+    frequency_filters: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Initialize tone detector for a channel."""
     with _detectors_mutex:
@@ -654,7 +762,7 @@ def init_channel_detector(
             new_tone_config and new_tone_config.get("detect_new_tones", False)
         ):
             _channel_detectors[channel_id] = ChannelToneDetector(
-                channel_id, tone_definitions, new_tone_config, passthrough_config
+                channel_id, tone_definitions, new_tone_config, passthrough_config, frequency_filters
             )
             print(
                 f"[TONE DETECTION] Initialized detector for channel "
@@ -662,9 +770,11 @@ def init_channel_detector(
                 f"definition(s)"
             )
             if new_tone_config and new_tone_config.get("detect_new_tones", False):
+                tolerance_ms = new_tone_config.get('new_tone_length_tolerance_ms', 50)
                 print(
                     f"[TONE DETECTION] New tone detection enabled: "
-                    f"length={new_tone_config.get('new_tone_length_ms', 1000)} ms, "  # noqa: E501
+                    f"length={new_tone_config.get('new_tone_length_ms', 1000)} ms "  # noqa: E501
+                    f"(±{tolerance_ms} ms tolerance), "  # noqa: E501
                     f"range=±{new_tone_config.get('new_tone_range_hz', 3)} Hz, "  # noqa: E501
                     f"strikes=3"  # noqa: E501
                 )

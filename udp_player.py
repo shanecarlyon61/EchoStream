@@ -212,8 +212,9 @@ class UDPPlayer:
                         if tone_defs or (
                             new_tone_cfg and new_tone_cfg.get("detect_new_tones", False)
                         ):
+                            freq_filters = self._frequency_filters.get(channel_id, [])
                             init_channel_detector(
-                                channel_id, tone_defs, new_tone_cfg, passthrough_cfg
+                                channel_id, tone_defs, new_tone_cfg, passthrough_cfg, freq_filters
                             )
                             print(
                                 f"[UDP] Initialized tone detection for channel {channel_id} "
