@@ -520,6 +520,8 @@ class ChannelToneDetector:
         Returns:
             True if tone sequence detected, False otherwise
         """
+        import random  # For debug logging
+        
         # Get tone lengths in seconds
         tone_a_length_seconds = tone_def["tone_a_length_ms"] / 1000.0
         tone_b_length_seconds = tone_def["tone_b_length_ms"] / 1000.0
@@ -534,6 +536,8 @@ class ChannelToneDetector:
             buffer_len = len(self.audio_buffer)
         
         if buffer_len < total_samples:
+            if random.randint(1, 100) == 1:  # Log occasionally when buffer is too small
+                print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_def['tone_id']}: Buffer too small - {buffer_len} samples (need {total_samples})")
             return False
 
         # OPTIMIZATION 2: Quick volume check on recent samples BEFORE expensive buffer conversion
@@ -546,7 +550,6 @@ class ChannelToneDetector:
         volume_db = calculate_rms_volume(recent_samples)
         
         # Debug: Log volume periodically
-        import random
         if random.randint(1, 50) == 1:
             print(f"[TONE DETECT] Channel {self.channel_id}: Volume={volume_db:.1f} dB (threshold=-20dB)")
         
@@ -558,6 +561,8 @@ class ChannelToneDetector:
         current_time = time.time()
         time_since_last = current_time - self.last_detection_time.get(tone_id, 0)
         if time_since_last < MIN_DETECTION_INTERVAL_SECONDS:
+            if random.randint(1, 50) == 1:  # Log occasionally when too soon
+                print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Too soon since last detection - {time_since_last:.1f}s (min {MIN_DETECTION_INTERVAL_SECONDS}s)")
             return False
 
         # OPTIMIZATION 3: Use already-converted recent_samples array (no duplicate conversion)
@@ -569,10 +574,14 @@ class ChannelToneDetector:
 
             # If 2+ peaks detected, signal doesn't have a pair of tones - reject
             if len(tone_a_peaks) >= 2:
+                if random.randint(1, 20) == 1:  # More frequent logging
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Tone A rejected - {len(tone_a_peaks)} peaks detected (expected 1): {[f'{p:.1f}Hz' for p in tone_a_peaks[:3]]}")
                 return False
 
             # If no peaks found, reject
             if len(tone_a_peaks) == 0:
+                if random.randint(1, 20) == 1:  # More frequent logging
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Tone A rejected - no peaks detected")
                 return False
 
             tone_a_freq = tone_a_peaks[0]
@@ -583,10 +592,14 @@ class ChannelToneDetector:
 
             # If 2+ peaks detected, signal doesn't have a pair of tones - reject
             if len(tone_b_peaks) >= 2:
+                if random.randint(1, 20) == 1:  # More frequent logging
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Tone B rejected - {len(tone_b_peaks)} peaks detected (expected 1): {[f'{p:.1f}Hz' for p in tone_b_peaks[:3]]}")
                 return False
 
             # If no peaks found, reject
             if len(tone_b_peaks) == 0:
+                if random.randint(1, 20) == 1:  # More frequent logging
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Tone B rejected - no peaks detected")
                 return False
 
             tone_b_freq = tone_b_peaks[0]
@@ -603,14 +616,21 @@ class ChannelToneDetector:
 
             # Require both frequencies to be stable before accepting
             if not (tone_a_stable and tone_b_stable):
+                if random.randint(1, 10) == 1:  # More frequent logging for stability
+                    stability_status = f"A: {'STABLE' if tone_a_stable else 'UNSTABLE'}, B: {'STABLE' if tone_b_stable else 'UNSTABLE'}"
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Frequencies not stable yet - {tone_a_freq:.1f}Hz, {tone_b_freq:.1f}Hz ({stability_status})")
                 return False
 
             # Check if detected frequencies are within filter config ranges
             if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
+                if random.randint(1, 10) == 1:  # More frequent logging
+                    filtered_a = self._is_frequency_filtered(tone_a_freq)
+                    filtered_b = self._is_frequency_filtered(tone_b_freq)
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Frequencies filtered out - A={tone_a_freq:.1f}Hz ({'FILTERED' if filtered_a else 'OK'}), B={tone_b_freq:.1f}Hz ({'FILTERED' if filtered_b else 'OK'})")
                 return False
 
-            # Debug: Log detected frequencies periodically
-            if random.randint(1, 50) == 1:
+            # Debug: Log detected frequencies more frequently
+            if random.randint(1, 10) == 1:  # Changed from 1 in 50 to 1 in 10
                 print(f"[TONE DETECT] Channel {self.channel_id}: Detected A={tone_a_freq:.1f}Hz, B={tone_b_freq:.1f}Hz | " +
                       f"Target A={tone_def['tone_a']:.1f}Hz±{tone_def.get('tone_a_range', 10)}, B={tone_def['tone_b']:.1f}Hz±{tone_def.get('tone_b_range', 10)}")
 
@@ -627,6 +647,25 @@ class ChannelToneDetector:
             detected_tone_b_duration_ms = (tone_b_samples / SAMPLE_RATE) * 1000.0
             tone_a_duration_match = abs(detected_tone_a_duration_ms - tone_def["tone_a_length_ms"]) <= DURATION_TOLERANCE_MS
             tone_b_duration_match = abs(detected_tone_b_duration_ms - tone_def["tone_b_length_ms"]) <= DURATION_TOLERANCE_MS
+
+            # Log mismatch details if frequencies are stable but don't match
+            if not (tone_a_match and tone_b_match and tone_a_duration_match and tone_b_duration_match):
+                if random.randint(1, 5) == 1:  # Very frequent logging for mismatches
+                    mismatch_details = []
+                    if not tone_a_match:
+                        diff_a = abs(tone_a_freq - tone_def["tone_a"])
+                        mismatch_details.append(f"A: {tone_a_freq:.1f}Hz (target {tone_def['tone_a']:.1f}Hz±{tone_def.get('tone_a_range', 10)}, diff={diff_a:.1f}Hz)")
+                    if not tone_b_match:
+                        diff_b = abs(tone_b_freq - tone_def["tone_b"])
+                        mismatch_details.append(f"B: {tone_b_freq:.1f}Hz (target {tone_def['tone_b']:.1f}Hz±{tone_def.get('tone_b_range', 10)}, diff={diff_b:.1f}Hz)")
+                    if not tone_a_duration_match:
+                        diff_dur_a = abs(detected_tone_a_duration_ms - tone_def["tone_a_length_ms"])
+                        mismatch_details.append(f"A duration: {detected_tone_a_duration_ms:.1f}ms (target {tone_def['tone_a_length_ms']}ms±{DURATION_TOLERANCE_MS}ms, diff={diff_dur_a:.1f}ms)")
+                    if not tone_b_duration_match:
+                        diff_dur_b = abs(detected_tone_b_duration_ms - tone_def["tone_b_length_ms"])
+                        mismatch_details.append(f"B duration: {detected_tone_b_duration_ms:.1f}ms (target {tone_def['tone_b_length_ms']}ms±{DURATION_TOLERANCE_MS}ms, diff={diff_dur_b:.1f}ms)")
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Mismatch - {', '.join(mismatch_details)}")
+                return False
 
             if tone_a_match and tone_b_match and tone_a_duration_match and tone_b_duration_match:
                 # Valid tone sequence detected!
@@ -966,6 +1005,15 @@ class ChannelToneDetector:
             Tone definition dict if a defined tone sequence is
             detected, None otherwise.
         """
+        import random
+        
+        # Log buffer status occasionally
+        with self.mutex:
+            buffer_len = len(self.audio_buffer)
+        
+        if random.randint(1, 100) == 1:  # Log occasionally
+            print(f"[TONE DETECT DEBUG] Channel {self.channel_id}: process_audio() called - buffer={buffer_len} samples, {len(self.tone_definitions)} tone definition(s)")
+        
         # Detect defined tones first
         for tone_def in self.tone_definitions:
             if self._detect_defined_tone(tone_def):

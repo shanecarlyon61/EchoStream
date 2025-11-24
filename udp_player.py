@@ -963,7 +963,7 @@ class UDPPlayer:
             if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
                 try:
                     print("[TONE DETECT] This is the final step to start tone detectio thread")
-                    self._tone_detect_queues[channel_id] = queue.Queue(maxsize=10)
+                    self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)  # Increased from 10 to prevent queue full errors
 
                     # Start tone detection worker thread
                     running_flag = threading.Event()
