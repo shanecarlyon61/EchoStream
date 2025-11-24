@@ -52,7 +52,8 @@ def main() -> int:
         print(f"[MAIN] WARNING: Audio device alignment failed: {e}")
 
     # Start WS without auto-register; GPIO activity will trigger channel registration
-    start_websocket("wss://audio.redenes.org/ws/", ch_ids)
+    # start_websocket("wss://audio.redenes.org/ws/", ch_ids)
+    start_websocket("ws://localhost:8765", ch_ids)
 
     # When UDP connection info arrives from WS, just log; the WS thread now starts its own UDP listener
     def _on_udp_ready(cfg: dict) -> None:

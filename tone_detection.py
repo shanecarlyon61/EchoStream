@@ -133,7 +133,7 @@ def calculate_peak_width(
 def freq_from_fft(
     sig: np.ndarray,
     fs: int = SAMPLE_RATE,
-    magnitude_threshold: float = 500.0,
+    magnitude_threshold: Optional[float] = None,
     min_prominence_ratio: float = 0.3,
     max_width_bins: int = 20,
     min_separation_hz: float = 20.0,
@@ -145,7 +145,9 @@ def freq_from_fft(
     Args:
         sig: Audio signal samples
         fs: Sample rate (default: 48000)
-        magnitude_threshold: Minimum magnitude to consider (default: 500.0)
+        magnitude_threshold: Minimum magnitude to consider. If None, uses adaptive
+                            threshold (10% of max magnitude). If provided, uses that value.
+                            (default: None = adaptive)
         min_prominence_ratio: Minimum prominence as ratio of peak magnitude
                             (default: 0.3 = 30%)
         max_width_bins: Maximum peak width in FFT bins (default: 20)
@@ -164,8 +166,21 @@ def freq_from_fft(
 
     # Find peaks with magnitude above threshold
     magnitudes = np.abs(f)
-    if np.max(magnitudes) == 0:
+    max_magnitude = np.max(magnitudes)
+    if max_magnitude == 0:
         return []
+
+    # Use adaptive threshold if not provided
+    # For low-volume audio, use a percentage of max magnitude instead of fixed value
+    if magnitude_threshold is None:
+        # Use 10% of max magnitude as threshold (works for both loud and quiet audio)
+        magnitude_threshold = max_magnitude * 0.1
+        # But ensure minimum threshold to avoid noise (at least 10.0 for very quiet signals)
+        magnitude_threshold = max(magnitude_threshold, 10.0)
+        # For very quiet signals, use even lower threshold (5% if max is very small)
+        if max_magnitude < 100.0:
+            magnitude_threshold = max_magnitude * 0.05
+            magnitude_threshold = max(magnitude_threshold, 5.0)
 
     # Find all local maxima above threshold
     candidate_peaks = []
@@ -570,7 +585,9 @@ class ChannelToneDetector:
             # Analyze Tone A window: [0:tone_a_samples]
             # (recent_samples already contains the last total_samples)
             tone_a_window = recent_samples[0:tone_a_samples]
-            tone_a_peaks = freq_from_fft(tone_a_window, SAMPLE_RATE)
+            # Use adaptive threshold based on signal strength for low-volume audio
+            # Calculate a relative threshold (percentage of max magnitude)
+            tone_a_peaks = freq_from_fft(tone_a_window, SAMPLE_RATE, magnitude_threshold=None)
 
             # If 2+ peaks detected, signal doesn't have a pair of tones - reject
             if len(tone_a_peaks) >= 2:
@@ -580,15 +597,21 @@ class ChannelToneDetector:
 
             # If no peaks found, reject
             if len(tone_a_peaks) == 0:
-                if random.randint(1, 20) == 1:  # More frequent logging
-                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Tone A rejected - no peaks detected")
+                if random.randint(1, 10) == 1:  # More frequent logging for debugging
+                    # Calculate max magnitude for debugging
+                    windowed = tone_a_window * hanning(len(tone_a_window))
+                    f = rfft(windowed)
+                    magnitudes = np.abs(f)
+                    max_mag = np.max(magnitudes) if len(magnitudes) > 0 else 0
+                    print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Tone A rejected - no peaks detected (max_magnitude={max_mag:.1f}, volume={volume_db:.1f}dB)")
                 return False
 
             tone_a_freq = tone_a_peaks[0]
 
             # Analyze Tone B window: [tone_a_samples:]
             tone_b_window = recent_samples[tone_a_samples:]
-            tone_b_peaks = freq_from_fft(tone_b_window, SAMPLE_RATE)
+            # Use adaptive threshold based on signal strength for low-volume audio
+            tone_b_peaks = freq_from_fft(tone_b_window, SAMPLE_RATE, magnitude_threshold=None)
 
             # If 2+ peaks detected, signal doesn't have a pair of tones - reject
             if len(tone_b_peaks) >= 2:
@@ -831,7 +854,8 @@ class ChannelToneDetector:
             # Analyze Tone A window: [0:target_tone_samples]
             # (recent_samples already contains the last total_samples)
             tone_a_window = recent_samples[0:target_tone_samples]
-            tone_a_peaks = freq_from_fft(tone_a_window, SAMPLE_RATE)
+            # Use adaptive threshold based on signal strength for low-volume audio
+            tone_a_peaks = freq_from_fft(tone_a_window, SAMPLE_RATE, magnitude_threshold=None)
 
             # If 2+ peaks detected, signal doesn't have a pair of tones - reject
             if len(tone_a_peaks) >= 2:
@@ -845,7 +869,8 @@ class ChannelToneDetector:
 
             # Analyze Tone B window: [target_tone_samples:]
             tone_b_window = recent_samples[target_tone_samples:]
-            tone_b_peaks = freq_from_fft(tone_b_window, SAMPLE_RATE)
+            # Use adaptive threshold based on signal strength for low-volume audio
+            tone_b_peaks = freq_from_fft(tone_b_window, SAMPLE_RATE, magnitude_threshold=None)
 
             # If 2+ peaks detected, signal doesn't have a pair of tones - reject
             if len(tone_b_peaks) >= 2:
