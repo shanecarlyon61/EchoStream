@@ -480,9 +480,23 @@ class UDPPlayer:
         print("[UDP] Heartbeat thread stopped")
 
     def start(self, udp_port: int, host_hint: str = "", aes_key_b64: str = "") -> bool:
-        if self._sock is not None:
-            print("[UDP] Already running")
-            return True
+        if self._sock is not None and self._server_addr is not None:
+            # Verify socket is still valid
+            try:
+                # Try to get socket info to verify it's still open
+                self._sock.getsockname()
+                print("[UDP] Already running and socket is valid")
+                return True
+            except (OSError, AttributeError):
+                # Socket is closed or invalid, need to recreate
+                print("[UDP] Socket exists but is invalid, recreating...")
+                try:
+                    self._sock.close()
+                except Exception:
+                    pass
+                self._sock = None
+                self._server_addr = None
+                # Fall through to create new socket
         try:
             # Init crypto/decoder if available
             # Use hardcoded key from C code if server sends 'N/A' or empty
@@ -802,6 +816,16 @@ class UDPPlayer:
                                         ).decode("utf-8")
 
                                         if self._sock and self._server_addr:
+                                            try:
+                                                # Verify socket is still valid before sending
+                                                self._sock.getsockname()
+                                            except (OSError, AttributeError):
+                                                # Socket is closed/invalid
+                                                if send_count <= 10 or send_count % 1000 == 0:
+                                                    print(f"[AUDIO TX ERROR] Channel {channel_id}: Socket is invalid, cannot send (send_count={send_count})")
+                                                # Skip this packet
+                                                continue
+                                            
                                             msg = json.dumps(
                                                 {
                                                     "channel_id": channel_id,
@@ -809,26 +833,34 @@ class UDPPlayer:
                                                     "data": b64_data,
                                                 }
                                             )
-                                            self._sock.sendto(
-                                                msg.encode("utf-8"), self._server_addr
-                                            )  # nosec
+                                            try:
+                                                self._sock.sendto(
+                                                    msg.encode("utf-8"), self._server_addr
+                                                )  # nosec
 
-                                            send_count += 1
-                                            if (
-                                                send_count <= 5
-                                                or send_count % 10000 == 0
-                                            ):
-                                                print(
-                                                    f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
-                                                    f"({len(msg)} bytes) to {self._server_addr}"
-                                                )
-                                        else:
-                                            if send_count <= 10:
-                                                print(
-                                                    f"[AUDIO TX ERROR] Channel {channel_id}: "
-                                                    f"Cannot send - sock={self._sock is not None}, "
-                                                    f"addr={self._server_addr}"
-                                                )
+                                                send_count += 1
+                                                if (
+                                                    send_count <= 5
+                                                    or send_count % 10000 == 0
+                                                ):
+                                                    print(
+                                                        f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
+                                                        f"({len(msg)} bytes) to {self._server_addr}"
+                                                    )
+                                            except (OSError, AttributeError) as sock_err:
+                                                # Socket error - log and continue
+                                                if send_count <= 10 or send_count % 1000 == 0:
+                                                    print(f"[AUDIO TX ERROR] Channel {channel_id}: Socket send failed: {sock_err} (send_count={send_count})")
+                                                # Don't increment send_count on failure
+                                                    continue
+                                                else:
+                                                    # Always log this error as it indicates a serious problem
+                                                    if send_count <= 10 or send_count % 1000 == 0:
+                                                        print(
+                                                            f"[AUDIO TX ERROR] Channel {channel_id}: "
+                                                            f"Cannot send - sock={self._sock is not None}, "
+                                                            f"addr={self._server_addr} (send_count={send_count})"
+                                                        )
                                     except Exception as e:
                                         if send_count <= 10:
                                             print(
@@ -849,6 +881,45 @@ class UDPPlayer:
                             channel_id, False
                         ):
                             tone_queue = self._tone_detect_queues.get(channel_id)
+                            detect_thread = self._tone_detect_threads.get(channel_id)
+                            running_flag = self._tone_detect_running.get(channel_id)
+                            
+                            # Health check: verify tone detection thread is alive and restart if needed
+                            if send_count > 0 and send_count % 10000 == 0:
+                                thread_needs_restart = False
+                                if not detect_thread or not detect_thread.is_alive():
+                                    print(f"[TONE DETECT] WARNING: Tone detection thread is dead for {channel_id}, attempting restart...")
+                                    thread_needs_restart = True
+                                elif running_flag and not running_flag.is_set():
+                                    print(f"[TONE DETECT] WARNING: Tone detection flag is cleared for {channel_id}, attempting restart...")
+                                    thread_needs_restart = True
+                                
+                                if thread_needs_restart:
+                                    try:
+                                        # Ensure queue exists
+                                        if channel_id not in self._tone_detect_queues:
+                                            self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)
+                                        
+                                        # Create new running flag
+                                        running_flag = threading.Event()
+                                        running_flag.set()
+                                        self._tone_detect_running[channel_id] = running_flag
+                                        
+                                        # Start new thread
+                                        detect_thread = threading.Thread(
+                                            target=self._tone_detection_worker,
+                                            args=(channel_id,),
+                                            daemon=True,
+                                            name=f"ToneDetect-{channel_id}",
+                                        )
+                                        self._tone_detect_threads[channel_id] = detect_thread
+                                        detect_thread.start()
+                                        print(f"[TONE DETECT] Auto-restarted worker thread for {channel_id}")
+                                    except Exception as e:
+                                        print(f"[TONE DETECT] ERROR: Failed to auto-restart tone detection thread: {e}")
+                                        import traceback
+                                        traceback.print_exc()
+                            
                             if tone_queue:
                                 try:
                                     tone_queue.put_nowait(audio_chunk)
@@ -858,6 +929,10 @@ class UDPPlayer:
                                     if send_count <= 10 or send_count % 100 == 0:
                                         print(f"[AUDIO TX DEBUG] Channel {channel_id}: Tone queue FULL, skipping (send_count={send_count})")
                                     pass
+                            else:
+                                # Queue missing - this shouldn't happen but log it
+                                if send_count <= 10 or send_count % 10000 == 0:
+                                    print(f"[TONE DETECT] WARNING: Tone queue missing for {channel_id} (send_count={send_count})")
 
                         bundle[buffer_pos_key] = 0
             except Exception as e:
@@ -891,6 +966,68 @@ class UDPPlayer:
             if channel_index in self._input_streams:
                 print(f"[AUDIO TX] Channel {channel_id} already transmitting")
                 self._transmitting[channel_index] = True
+                
+                # Verify and restart tone detection thread if needed
+                if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
+                    detect_thread = self._tone_detect_threads.get(channel_id)
+                    running_flag = self._tone_detect_running.get(channel_id)
+                    
+                    # Check if thread is missing or dead
+                    if not detect_thread or not detect_thread.is_alive():
+                        print(f"[TONE DETECT] Tone detection thread missing or dead for {channel_id}, restarting...")
+                        try:
+                            # Ensure queue exists
+                            if channel_id not in self._tone_detect_queues:
+                                self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)
+                            
+                            # Create new running flag if missing
+                            if not running_flag:
+                                running_flag = threading.Event()
+                                running_flag.set()
+                                self._tone_detect_running[channel_id] = running_flag
+                            elif not running_flag.is_set():
+                                # Restart if flag was cleared
+                                running_flag.set()
+                            
+                            # Start new thread
+                            detect_thread = threading.Thread(
+                                target=self._tone_detection_worker,
+                                args=(channel_id,),
+                                daemon=True,
+                                name=f"ToneDetect-{channel_id}",
+                            )
+                            self._tone_detect_threads[channel_id] = detect_thread
+                            detect_thread.start()
+                            print(f"[TONE DETECT] Restarted worker thread for {channel_id}")
+                        except Exception as e:
+                            print(f"[TONE DETECT] WARNING: Failed to restart tone detection thread: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    elif running_flag and not running_flag.is_set():
+                        # Thread exists but flag is cleared, restart it
+                        print(f"[TONE DETECT] Tone detection flag cleared for {channel_id}, restarting thread...")
+                        try:
+                            running_flag.set()
+                            # Wait a bit and check if thread is still alive
+                            time.sleep(0.1)
+                            if not detect_thread.is_alive():
+                                # Thread died, restart it
+                                self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)
+                                running_flag = threading.Event()
+                                running_flag.set()
+                                self._tone_detect_running[channel_id] = running_flag
+                                detect_thread = threading.Thread(
+                                    target=self._tone_detection_worker,
+                                    args=(channel_id,),
+                                    daemon=True,
+                                    name=f"ToneDetect-{channel_id}",
+                                )
+                                self._tone_detect_threads[channel_id] = detect_thread
+                                detect_thread.start()
+                                print(f"[TONE DETECT] Restarted worker thread for {channel_id}")
+                        except Exception as e:
+                            print(f"[TONE DETECT] WARNING: Failed to restart tone detection: {e}")
+                
                 return True
 
             device_index = select_input_device_for_channel(channel_index)

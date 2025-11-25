@@ -521,6 +521,36 @@ async def websocket_handler_async(url: str):
                                 print(f"[WEBSOCKET] ✗ Failed to re-send connect message for channel {ch_id}")
                             await asyncio.sleep(0.1)
                         pending_register_ids.clear()
+                    
+                    # Restart audio transmission for active channels after reconnection
+                    # Wait a bit for UDP config to be received, then restart transmission
+                    await asyncio.sleep(1.0)  # Give server time to send UDP config
+                    if _AUDIO_OK:
+                        try:
+                            from udp_player import global_udp_player
+                            if global_udp_player and global_udp_player._running.is_set():
+                                channel_ids_to_check = registered_channels if registered_channels else global_udp_player._channel_ids
+                                if channel_ids_to_check:
+                                    print(f"[WEBSOCKET] Checking active channels to restart audio transmission after reconnection...")
+                                    gpio_keys = list(GPIO_PINS.keys())
+                                    for idx, channel_id in enumerate(channel_ids_to_check):
+                                        if idx < len(gpio_keys):
+                                            gpio_num = gpio_keys[idx]
+                                            gpio_state = gpio_states.get(gpio_num, -1)
+                                            if gpio_state == 0:  # GPIO is ACTIVE
+                                                # Always restart transmission for active GPIO channels after reconnection
+                                                # The start_transmission_for_channel will handle if already transmitting
+                                                print(f"[WEBSOCKET] Restarting audio transmission for channel {channel_id} (GPIO {gpio_num} is ACTIVE)")
+                                                if global_udp_player.start_transmission_for_channel(idx):
+                                                    print(f"[WEBSOCKET] ✓ Restarted audio transmission for channel {channel_id}")
+                                                    # Re-send transmit_started event to notify server
+                                                    send_transmit_event(channel_id, True)
+                                                else:
+                                                    print(f"[WEBSOCKET] ✗ Failed to restart audio transmission for channel {channel_id}")
+                        except Exception as e:
+                            print(f"[WEBSOCKET] ERROR: Failed to restart audio transmission after reconnection: {e}")
+                            import traceback
+                            traceback.print_exc()
                 else:
                     reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                     continue
