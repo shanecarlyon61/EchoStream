@@ -112,6 +112,18 @@ class UDPPlayer:
         self._tone_detect_queues: Dict[str, queue.Queue] = {}
         self._tone_detect_threads: Dict[str, threading.Thread] = {}
         self._tone_detect_running: Dict[str, threading.Event] = {}
+        
+        # Track input worker threads for health monitoring
+        self._input_worker_threads: Dict[int, threading.Thread] = {}
+        
+        # Track last packet send time for each channel to detect stalled threads
+        self._last_packet_time: Dict[int, float] = {}
+        
+        # Health monitoring thread
+        self._health_monitor_thread: Optional[threading.Thread] = None
+        
+        # Start health monitor immediately
+        self._start_health_monitor()
 
     def _ensure_stream_for_channel(self, channel_index: int) -> None:
         with self._lock:
@@ -276,6 +288,97 @@ class UDPPlayer:
         except Exception:
             return None
 
+    def _start_health_monitor(self) -> None:
+        """Start health monitor thread if not already running."""
+        if self._health_monitor_thread is None or not self._health_monitor_thread.is_alive():
+            self._health_monitor_thread = threading.Thread(
+                target=self._health_monitor_loop,
+                daemon=True,
+                name="UDPHealthMonitor"
+            )
+            self._health_monitor_thread.start()
+            print("[UDP] Started health monitoring thread")
+    
+    def _health_monitor_loop(self) -> None:
+        """Periodically check health of input worker threads and restart dead/stalled ones."""
+        print("[UDP] Health monitor thread started")
+        status_report_count = 0
+        while self._running.is_set():
+            try:
+                time.sleep(5.0)  # Check every 5 seconds
+                current_time = time.time()
+                status_report_count += 1
+                
+                # Log status every 12 checks (1 minute)
+                if status_report_count % 12 == 0:
+                    with self._input_lock:
+                        active_threads = sum(1 for t in self._input_worker_threads.values() if t.is_alive())
+                        transmitting_count = sum(1 for v in self._transmitting.values() if v)
+                        print(f"[UDP HEALTH] Status: {active_threads} active threads, {transmitting_count} transmitting channels")
+                
+                with self._input_lock:
+                    # Check all input worker threads
+                    dead_threads = []
+                    stalled_threads = []
+                    
+                    for channel_index, thread in list(self._input_worker_threads.items()):
+                        if channel_index >= len(self._channel_ids):
+                            continue
+                            
+                        channel_id = self._channel_ids[channel_index]
+                        
+                        # Check if thread is dead
+                        if not thread.is_alive():
+                            dead_threads.append(channel_index)
+                            print(f"[UDP HEALTH] Thread for channel {channel_id} is DEAD")
+                        # Check if thread is alive but not sending packets (stalled)
+                        elif self._transmitting.get(channel_index, False):
+                            last_packet_time = self._last_packet_time.get(channel_index, 0)
+                            time_since_last_packet = current_time - last_packet_time
+                            
+                            # If no packets sent in last 10 seconds, thread is likely stalled
+                            # OR if last_packet_time is 0 and thread has been running, it's stuck
+                            if (time_since_last_packet > 10.0 and last_packet_time > 0) or (last_packet_time == 0 and time_since_last_packet > 5.0):
+                                stalled_threads.append(channel_index)
+                                if last_packet_time == 0:
+                                    print(f"[UDP HEALTH] Thread for channel {channel_id} is STUCK (never sent packets)")
+                                else:
+                                    print(f"[UDP HEALTH] Thread for channel {channel_id} is STALLED (no packets for {time_since_last_packet:.1f}s)")
+                    
+                    # Restart dead or stalled threads
+                    threads_to_restart = dead_threads + stalled_threads
+                    for channel_index in threads_to_restart:
+                        if channel_index < len(self._channel_ids):
+                            channel_id = self._channel_ids[channel_index]
+                            print(f"[UDP HEALTH] Restarting transmission for channel {channel_id}...")
+                            
+                            # Check if channel should be transmitting
+                            if self._transmitting.get(channel_index, False):
+                                try:
+                                    # Remove old thread reference
+                                    if channel_index in self._input_worker_threads:
+                                        del self._input_worker_threads[channel_index]
+                                    
+                                    # Restart transmission
+                                    if self.start_transmission_for_channel(channel_index):
+                                        print(f"[UDP HEALTH] ✓ Successfully restarted transmission for channel {channel_id}")
+                                        # Reset last packet time
+                                        self._last_packet_time[channel_index] = current_time
+                                    else:
+                                        print(f"[UDP HEALTH] ✗ Failed to restart transmission for channel {channel_id}")
+                                except Exception as e:
+                                    print(f"[UDP HEALTH] ERROR restarting channel {channel_id}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                            
+            except Exception as e:
+                print(f"[UDP HEALTH] ERROR in health monitor: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(5.0)
+        
+        print("[UDP] Health monitor thread stopped")
+    
     def _receiver_loop(self) -> None:
         print("[UDP] Receiver thread started")
         print(f"[UDP] Channel IDs configured: {self._channel_ids}")
@@ -480,13 +583,40 @@ class UDPPlayer:
         print("[UDP] Heartbeat thread stopped")
 
     def start(self, udp_port: int, host_hint: str = "", aes_key_b64: str = "") -> bool:
+        host_override = os.getenv("ES_UDP_HOST_OVERRIDE", "").strip()
+        host_used = host_override or host_hint
+        new_server_addr = (host_used, int(udp_port)) if host_used else None
+        
         if self._sock is not None and self._server_addr is not None:
             # Verify socket is still valid
             try:
                 # Try to get socket info to verify it's still open
                 self._sock.getsockname()
-                print("[UDP] Already running and socket is valid")
-                return True
+                
+                # Check if server address has changed
+                if new_server_addr and self._server_addr != new_server_addr:
+                    print(f"[UDP] Server address changed from {self._server_addr} to {new_server_addr}, updating...")
+                    self._server_addr = new_server_addr
+                    # Send a heartbeat to the new address to verify connectivity
+                    try:
+                        heartbeat_msg = b'{"type":"KEEP_ALIVE"}'
+                        self._sock.sendto(heartbeat_msg, self._server_addr)  # nosec
+                        print(f"[UDP] Updated server address to {self._server_addr}")
+                    except Exception as e:
+                        print(f"[UDP] ERROR: Failed to send heartbeat to new address: {e}")
+                        # If send fails, recreate socket
+                        try:
+                            self._sock.close()
+                        except Exception:
+                            pass
+                        self._sock = None
+                        self._server_addr = None
+                        # Fall through to create new socket
+                    else:
+                        return True
+                else:
+                    print("[UDP] Already running and socket is valid")
+                    return True
             except (OSError, AttributeError):
                 # Socket is closed or invalid, need to recreate
                 print("[UDP] Socket exists but is invalid, recreating...")
@@ -551,6 +681,9 @@ class UDPPlayer:
                 return False
 
             self._server_addr = (host_used, int(udp_port))
+            
+            # Ensure health monitoring thread is running
+            self._start_health_monitor()
 
             try:
                 heartbeat_msg = b'{"type":"KEEP_ALIVE"}'
@@ -626,8 +759,13 @@ class UDPPlayer:
 
                 chunk_count += 1
                 
+                # Get queue size early to determine batch processing strategy
+                current_time = time.time()
+                time_since_last = current_time - last_process_time
+                queue_size = audio_queue.qsize()
+                
                 if chunk_count <= 5 or chunk_count % 100 == 0:
-                    print(f"[TONE DETECT DEBUG] Channel {channel_id}: Received chunk #{chunk_count} from queue")
+                    print(f"[TONE DETECT DEBUG] Channel {channel_id}: Received chunk #{chunk_count} from queue (qsize={queue_size})")
 
                 # Apply frequency filters (fast operation)
                 if apply_audio_frequency_filters:
@@ -675,16 +813,50 @@ class UDPPlayer:
                     except Exception:
                         pass
 
-                # Process tone detection periodically (expensive FFT operations)
-                # Note: We already added samples above, so we call detector.process_audio() directly
-                # to avoid adding samples twice
-                current_time = time.time()
-                if (current_time - last_process_time) >= PROCESS_INTERVAL:
+                # FIX: When queue is very full, process multiple chunks in batch before doing expensive tone detection
+                # This allows us to drain the queue faster by processing chunks quickly, then doing tone detection
+                chunks_to_process_before_tone_detect = 1  # Default: process one chunk at a time
+                if queue_size > 80:
+                    # Queue is almost full - process 5 chunks before doing tone detection
+                    chunks_to_process_before_tone_detect = 5
+                elif queue_size > 50:
+                    # Queue is half full - process 3 chunks before doing tone detection
+                    chunks_to_process_before_tone_detect = 3
+                elif queue_size > 20:
+                    # Queue is backing up - process 2 chunks before doing tone detection
+                    chunks_to_process_before_tone_detect = 2
+                
+                # Only do expensive tone detection after processing N chunks OR if enough time has passed
+                should_do_tone_detection = False
+                adaptive_interval = PROCESS_INTERVAL
+                
+                if queue_size > 80:
+                    # Queue is almost full (80%+) - process every N chunks to drain faster
+                    should_do_tone_detection = (chunk_count % chunks_to_process_before_tone_detect == 0)
+                    adaptive_interval = 0.05  # Process every 50ms
+                elif queue_size > 50:
+                    # Queue is half full - process every N chunks and more frequently
+                    should_do_tone_detection = (chunk_count % chunks_to_process_before_tone_detect == 0)
+                    adaptive_interval = 0.1  # Process every 100ms
+                elif queue_size > 20:
+                    # Queue is starting to back up - process every N chunks more often
+                    should_do_tone_detection = (chunk_count % chunks_to_process_before_tone_detect == 0)
+                    adaptive_interval = 0.15  # Process every 150ms
+                elif queue_size > 10:
+                    # Queue is getting backed up - process every N chunks sooner
+                    should_do_tone_detection = (chunk_count % chunks_to_process_before_tone_detect == 0)
+                    adaptive_interval = 0.2  # Process every 200ms
+                else:
+                    # Normal operation - use standard interval with lower threshold
+                    adaptive_interval = PROCESS_INTERVAL
+                    should_do_tone_detection = (time_since_last >= adaptive_interval) or (queue_size > 5)
+                
+                if should_do_tone_detection:
                     process_count += 1
                     last_process_time = current_time
                     
                     if process_count <= 5 or process_count % 20 == 0:
-                        print(f"[TONE DETECT DEBUG] Channel {channel_id}: Processing tone detection (process_count={process_count}, chunks_processed={chunk_count})")
+                        print(f"[TONE DETECT DEBUG] Channel {channel_id}: Processing tone detection (process_count={process_count}, chunks_processed={chunk_count}, qsize={queue_size}, batch_size={chunks_to_process_before_tone_detect})")
                     
                     try:
                         # Import detector access from tone_detection module
@@ -834,33 +1006,37 @@ class UDPPlayer:
                                                 }
                                             )
                                             try:
-                                                self._sock.sendto(
-                                                    msg.encode("utf-8"), self._server_addr
+                                                msg_bytes = msg.encode("utf-8")
+                                                bytes_sent = self._sock.sendto(
+                                                    msg_bytes, self._server_addr
                                                 )  # nosec
 
                                                 send_count += 1
+                                                # Update last packet time for health monitoring
+                                                self._last_packet_time[channel_index] = time.time()
+                                                
+                                                # Log more frequently to help debug audio transmission issues
                                                 if (
-                                                    send_count <= 5
-                                                    or send_count % 10000 == 0
+                                                    send_count <= 10
+                                                    or send_count % 100 == 0  # Log every 100 packets for better visibility
                                                 ):
                                                     print(
                                                         f"[AUDIO TX] Channel {channel_id}: Sent audio packet #{send_count} "
-                                                        f"({len(msg)} bytes) to {self._server_addr}"
+                                                        f"({bytes_sent}/{len(msg_bytes)} bytes) to {self._server_addr}"
+                                                    )
+                                                # Verify bytes sent matches message length
+                                                if bytes_sent != len(msg_bytes):
+                                                    print(
+                                                        f"[AUDIO TX WARNING] Channel {channel_id}: Partial send - "
+                                                        f"sent {bytes_sent} of {len(msg_bytes)} bytes"
                                                     )
                                             except (OSError, AttributeError) as sock_err:
                                                 # Socket error - log and continue
-                                                if send_count <= 10 or send_count % 1000 == 0:
+                                                if send_count <= 10 or send_count % 100 == 0:
                                                     print(f"[AUDIO TX ERROR] Channel {channel_id}: Socket send failed: {sock_err} (send_count={send_count})")
+                                                    print(f"[AUDIO TX ERROR] Socket: {self._sock}, Server addr: {self._server_addr}")
                                                 # Don't increment send_count on failure
-                                                    continue
-                                                else:
-                                                    # Always log this error as it indicates a serious problem
-                                                    if send_count <= 10 or send_count % 1000 == 0:
-                                                        print(
-                                                            f"[AUDIO TX ERROR] Channel {channel_id}: "
-                                                            f"Cannot send - sock={self._sock is not None}, "
-                                                            f"addr={self._server_addr} (send_count={send_count})"
-                                                        )
+                                                continue
                                     except Exception as e:
                                         if send_count <= 10:
                                             print(
@@ -885,7 +1061,8 @@ class UDPPlayer:
                             running_flag = self._tone_detect_running.get(channel_id)
                             
                             # Health check: verify tone detection thread is alive and restart if needed
-                            if send_count > 0 and send_count % 10000 == 0:
+                            # Check more frequently (every 1000 packets instead of 10000) to catch issues sooner
+                            if send_count > 0 and send_count % 1000 == 0:
                                 thread_needs_restart = False
                                 if not detect_thread or not detect_thread.is_alive():
                                     print(f"[TONE DETECT] WARNING: Tone detection thread is dead for {channel_id}, attempting restart...")
@@ -893,12 +1070,16 @@ class UDPPlayer:
                                 elif running_flag and not running_flag.is_set():
                                     print(f"[TONE DETECT] WARNING: Tone detection flag is cleared for {channel_id}, attempting restart...")
                                     thread_needs_restart = True
+                                # Also check if queue is consistently full (might indicate thread is stuck)
+                                if tone_queue and tone_queue.full():
+                                    if send_count % 5000 == 0:  # Log less frequently for queue full
+                                        print(f"[TONE DETECT] WARNING: Tone queue is consistently full for {channel_id}, thread may be stuck")
                                 
                                 if thread_needs_restart:
                                     try:
                                         # Ensure queue exists
                                         if channel_id not in self._tone_detect_queues:
-                                            self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)
+                                            self._tone_detect_queues[channel_id] = queue.Queue(maxsize=100)  # Increased from 50 to handle bursts
                                         
                                         # Create new running flag
                                         running_flag = threading.Event()
@@ -965,7 +1146,154 @@ class UDPPlayer:
         with self._input_lock:
             if channel_index in self._input_streams:
                 print(f"[AUDIO TX] Channel {channel_id} already transmitting")
-                self._transmitting[channel_index] = True
+                
+                # Check if input worker thread is still alive and actually sending packets
+                input_thread = self._input_worker_threads.get(channel_index)
+                current_time = time.time()
+                last_packet_time = self._last_packet_time.get(channel_index, 0)
+                time_since_last_packet = current_time - last_packet_time
+                
+                thread_dead = not input_thread or not input_thread.is_alive()
+                # FIX: If thread exists but last_packet_time is 0, it means thread never sent packets
+                # OR if thread exists and no packets for >10s, it's stalled
+                thread_stalled = False
+                if input_thread and input_thread.is_alive():
+                    if last_packet_time == 0:
+                        # Thread exists but never sent a packet - likely stuck or just started
+                        # If it's been running for more than 5 seconds without sending, treat as stalled
+                        thread_stalled = True  # Treat as stalled if no packets ever sent
+                    elif time_since_last_packet > 10.0:
+                        thread_stalled = True
+                elif input_thread is None:
+                    # No thread reference at all - force restart
+                    thread_dead = True
+                
+                if thread_dead:
+                    if input_thread is None:
+                        print(f"[AUDIO TX] WARNING: No thread reference for {channel_id}, creating new thread...")
+                    else:
+                        print(f"[AUDIO TX] WARNING: Input worker thread is DEAD for {channel_id}, restarting...")
+                elif thread_stalled:
+                    if last_packet_time == 0:
+                        print(f"[AUDIO TX] WARNING: Input worker thread for {channel_id} exists but never sent packets, restarting...")
+                    else:
+                        print(f"[AUDIO TX] WARNING: Input worker thread is STALLED for {channel_id} (no packets for {time_since_last_packet:.1f}s), restarting...")
+                
+                if thread_dead or thread_stalled:
+                    try:
+                        bundle = self._input_streams.get(channel_index)
+                        if bundle:
+                            # FIX: Properly clean up old thread and stream before restarting
+                            old_thread = bundle.get("thread")
+                            old_stream = bundle.get("stream")
+                            old_pa = bundle.get("pa")
+                            old_encoder = bundle.get("encoder")
+                            
+                            # Wait for old thread to finish (with timeout)
+                            if old_thread and old_thread.is_alive():
+                                print(f"[AUDIO TX] Waiting for old thread to finish for {channel_id}...")
+                                old_thread.join(timeout=1.0)
+                                if old_thread.is_alive():
+                                    print(f"[AUDIO TX] WARNING: Old thread for {channel_id} did not stop within timeout")
+                            
+                            # Remove old thread reference
+                            if channel_index in self._input_worker_threads:
+                                del self._input_worker_threads[channel_index]
+                            
+                            # Close and cleanup old stream/encoder
+                            if old_stream:
+                                try:
+                                    if hasattr(old_stream, 'is_active') and old_stream.is_active():
+                                        old_stream.stop_stream()
+                                    old_stream.close()
+                                    print(f"[AUDIO TX] Closed old stream for {channel_id}")
+                                except Exception as e:
+                                    print(f"[AUDIO TX] WARNING: Error closing old stream for {channel_id}: {e}")
+                            
+                            if old_encoder:
+                                try:
+                                    old_encoder.destroy()
+                                    print(f"[AUDIO TX] Destroyed old encoder for {channel_id}")
+                                except Exception as e:
+                                    print(f"[AUDIO TX] WARNING: Error destroying old encoder for {channel_id}: {e}")
+                            
+                            # Recreate the stream/encoder/bundle from scratch
+                            device_index = select_input_device_for_channel(channel_index)
+                            if device_index is None:
+                                print(f"[AUDIO TX] ERROR: No input device available for channel {channel_index}")
+                                return False
+                            
+                            pa, stream = open_input_stream(device_index, frames_per_buffer=1024)
+                            if pa is None or stream is None:
+                                print(f"[AUDIO TX] ERROR: Failed to open input stream for channel {channel_index}")
+                                return False
+                            
+                            encoder = None
+                            if HAS_OPUS:
+                                try:
+                                    encoder = opuslib.Encoder(48000, 1, opuslib.APPLICATION_VOIP)
+                                    encoder.bitrate = 64000
+                                    encoder.vbr = True
+                                except Exception as e:
+                                    print(f"[AUDIO TX] ERROR: Opus encoder init failed for channel {channel_index}: {e}")
+                                    close_stream(pa, stream)
+                                    return False
+                            else:
+                                print("[AUDIO TX] ERROR: Opus library not available")
+                                close_stream(pa, stream)
+                                return False
+                            
+                            # Start input stream
+                            try:
+                                stream.start_stream()
+                            except Exception as e:
+                                print(f"[AUDIO TX] ERROR: Failed to start input stream: {e}")
+                                close_stream(pa, stream)
+                                if encoder:
+                                    try:
+                                        encoder.destroy()
+                                    except Exception:
+                                        pass
+                                return False
+                            
+                            input_buffer = np.zeros(1920, dtype=np.float32)
+                            
+                            # Update bundle with new stream/encoder
+                            bundle["pa"] = pa
+                            bundle["stream"] = stream
+                            bundle["encoder"] = encoder
+                            bundle["buffer"] = input_buffer
+                            bundle["buffer_pos"] = 0
+                            
+                            # Start new thread
+                            thread = threading.Thread(
+                                target=self._audio_input_worker,
+                                args=(channel_index, channel_id),
+                                daemon=True,
+                                name=f"AudioInput-{channel_id}",
+                            )
+                            bundle["thread"] = thread
+                            self._input_worker_threads[channel_index] = thread
+                            self._transmitting[channel_index] = True
+                            self._last_packet_time[channel_index] = current_time  # Reset timer
+                            thread.start()
+                            print(f"[AUDIO TX] ✓ Restarted input worker thread for channel {channel_id}")
+                            
+                            # Verify thread started successfully
+                            time.sleep(0.1)  # Give thread a moment to start
+                            if not thread.is_alive():
+                                print(f"[AUDIO TX] ERROR: Restarted thread for {channel_id} died immediately!")
+                                return False
+                        else:
+                            print(f"[AUDIO TX] ERROR: No bundle found for channel {channel_id}, cannot restart")
+                    except Exception as e:
+                        print(f"[AUDIO TX] ERROR: Failed to restart input worker thread: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        return False
+                else:
+                    # Thread is alive and sending packets, just ensure transmitting flag is set
+                    self._transmitting[channel_index] = True
                 
                 # Verify and restart tone detection thread if needed
                 if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
@@ -978,7 +1306,7 @@ class UDPPlayer:
                         try:
                             # Ensure queue exists
                             if channel_id not in self._tone_detect_queues:
-                                self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)
+                                self._tone_detect_queues[channel_id] = queue.Queue(maxsize=100)  # Increased from 50 to handle bursts
                             
                             # Create new running flag if missing
                             if not running_flag:
@@ -1012,7 +1340,7 @@ class UDPPlayer:
                             time.sleep(0.1)
                             if not detect_thread.is_alive():
                                 # Thread died, restart it
-                                self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)
+                                self._tone_detect_queues[channel_id] = queue.Queue(maxsize=100)  # Increased from 50 to handle bursts
                                 running_flag = threading.Event()
                                 running_flag.set()
                                 self._tone_detect_running[channel_id] = running_flag
@@ -1091,16 +1419,20 @@ class UDPPlayer:
                 target=self._audio_input_worker,
                 args=(channel_index, channel_id),
                 daemon=True,
+                name=f"AudioInput-{channel_id}",
             )
             bundle["thread"] = thread
+            self._input_worker_threads[channel_index] = thread
             self._transmitting[channel_index] = True
+            self._last_packet_time[channel_index] = time.time()  # Initialize last packet time
             thread.start()
+            print(f"[AUDIO TX] Started input worker thread for channel {channel_id} (index {channel_index})")
 
             # Start tone detection thread
             if HAS_TONE_DETECT and self._tone_detect_enabled.get(channel_id, False):
                 try:
                     print("[TONE DETECT] This is the final step to start tone detectio thread")
-                    self._tone_detect_queues[channel_id] = queue.Queue(maxsize=50)  # Increased from 10 to prevent queue full errors
+                    self._tone_detect_queues[channel_id] = queue.Queue(maxsize=100)  # Increased from 50 to handle bursts
 
                     # Start tone detection worker thread
                     running_flag = threading.Event()
@@ -1176,6 +1508,9 @@ class UDPPlayer:
                 del self._input_streams[channel_index]
             if channel_index in self._transmitting:
                 del self._transmitting[channel_index]
+            # Remove thread reference
+            if channel_index in self._input_worker_threads:
+                del self._input_worker_threads[channel_index]
 
     def stop(self) -> None:
         try:

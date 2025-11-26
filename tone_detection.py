@@ -181,7 +181,7 @@ def freq_from_fft(
 
         if not too_close:
             filtered_peaks.append(peak)
-            print(f"magnitude: {peak['magnitude']}")
+            # print(f"magnitude: {peak['magnitude']}")
     
     if len(filtered_peaks) > 0:
         filtered_peaks = [filtered_peaks[0]]  # Keep only the strongest peak
@@ -647,7 +647,7 @@ class ChannelToneDetector:
 
             tone_b_freq = peaks2[0]
 
-            print(f"tone_a_freq: {tone_a_freq}, tone_b_freq: {tone_b_freq}")
+            # print(f"tone_a_freq: {tone_a_freq}, tone_b_freq: {tone_b_freq}")
 
             if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
                 return False
@@ -835,6 +835,13 @@ def init_channel_detector(
             )
 
 def add_audio_samples_for_channel(channel_id: str, filtered_audio: np.ndarray) -> None:
+    
+    # Optionally send to visualizer if available
+    try:
+        from audio_visualizer import add_audio_to_visualizer
+        add_audio_to_visualizer(channel_id, filtered_audio)
+    except ImportError:
+        pass  # Visualizer not available, continue normally
     
     with _detectors_mutex:
         detector = _channel_detectors.get(channel_id)
