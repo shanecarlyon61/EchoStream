@@ -1,13 +1,24 @@
 import sys
+import signal
 from gpio_monitor import init_gpio, monitor_gpio, cleanup_gpio, GPIO_PINS
 from config import load_config, get_channel_ids, get_tone_detect_config
-from websocket_client import start_websocket
+from websocket_client import start_websocket, disconnect, global_interrupted
 from websocket_client import set_udp_config_callback
 from websocket_client import set_output_device_map
 from audio_devices import list_output_devices, select_output_device_for_channel
 
 
 def main() -> int:
+    # Set up signal handler for graceful shutdown
+    def signal_handler(sig, frame):
+        print("\n[MAIN] Shutdown signal received, cleaning up...")
+        global_interrupted.set()
+        # Note: Python will also raise KeyboardInterrupt for SIGINT,
+        # which will be caught by the try/except in monitor_gpio
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     print("[MAIN] Loading configuration...")
     cfg = load_config()
     ch_ids = get_channel_ids(cfg)
@@ -113,9 +124,40 @@ def main() -> int:
                 send_transmit_event(ch_id, True)
         print("[MAIN] Initial channel connection evaluation complete")
         monitor_gpio(poll_interval=0.1, status_every=100, on_change=_on_gpio_change)
+    except KeyboardInterrupt:
+        print("\n[MAIN] Interrupted by user")
     finally:
+        # Cleanup: Stop UDP player and disconnect WebSocket
+        try:
+            from tone_detection import stop_all_detectors
+            print("[MAIN] Stopping tone detection threads...")
+            stop_all_detectors()
+        except Exception as e:
+            print(f"[MAIN] WARNING: Error stopping tone detection: {e}")
+        
+        try:
+            from udp_player import global_udp_player
+            print("[MAIN] Stopping UDP player...")
+            global_udp_player.stop()
+        except Exception as e:
+            print(f"[MAIN] WARNING: Error stopping UDP player: {e}")
+        
+        try:
+            from websocket_client import _close_all_output_streams
+            print("[MAIN] Closing audio output streams...")
+            _close_all_output_streams()
+        except Exception as e:
+            print(f"[MAIN] WARNING: Error closing output streams: {e}")
+        
+        try:
+            print("[MAIN] Disconnecting WebSocket...")
+            disconnect()
+        except Exception as e:
+            print(f"[MAIN] WARNING: Error disconnecting WebSocket: {e}")
+        
         cleanup_gpio()
         print("[MAIN] GPIO monitor stopped")
+        print("[MAIN] Shutdown complete")
     return 0
 
 

@@ -116,7 +116,17 @@ def monitor_gpio(
     print("[GPIO] Monitoring GPIO pins for changes...")
     count = 0
     try:
+        # Import global_interrupted to check for shutdown signal
+        try:
+            from websocket_client import global_interrupted
+        except ImportError:
+            global_interrupted = None
+        
         while True:
+            # Check for shutdown signal
+            if global_interrupted and global_interrupted.is_set():
+                print("[GPIO] Shutdown signal received, stopping GPIO monitor...")
+                break
             changed = []
             for gpio_num, pin_num in GPIO_PINS.items():
                 val = read_pin(gpio_num)

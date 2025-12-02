@@ -1,6 +1,7 @@
 import numpy as np
 import threading
 import time
+import queue
 from typing import Dict, List, Optional, Any
 from numpy.fft import rfft, rfftfreq
 
@@ -29,7 +30,7 @@ MAX_BUFFER_SAMPLES = int(SAMPLE_RATE * MAX_BUFFER_SECONDS)
 
 MIN_DETECTION_INTERVAL_SECONDS = 2.0
 
-DURATION_TOLERANCE_MS = 80
+DURATION_TOLERANCE_MS = 0
 
 def parabolic(f, x):
     
@@ -96,9 +97,9 @@ def freq_from_fft(
     magnitude_threshold: float = 300,
     min_prominence_ratio: float = 0.3,
     max_width_bins: int = 20,
-    min_separation_hz: float = 50.0,  # Increased from 20.0 to better filter harmonics
-    min_freq: float = 50.0,  # Minimum frequency to consider (filters out low-frequency noise)
-    max_freq: float = 4000.0,  # Maximum frequency to consider
+    min_separation_hz: float = 50.0,
+    min_freq: float = 50.0,
+    max_freq: float = 4000.0,
 ) -> List[float]:
     
     if len(sig) == 0:
@@ -112,17 +113,14 @@ def freq_from_fft(
     if max_magnitude == 0:
         return []
     
-    # Additional check: if the signal is too quiet, return empty
-    # This prevents detecting tones from noise/empty audio
     signal_rms = np.sqrt(np.mean(sig**2))
-    if signal_rms < 1e-6:  # Very quiet signal threshold
+    if signal_rms < 1e-6:
         return []
 
     candidate_peaks = []
     for i in range(1, len(magnitudes) - 1):
         if (
-            magnitudes[i] > magnitude_threshold
-            and magnitudes[i] > magnitudes[i - 1]
+            magnitudes[i] > magnitudes[i - 1]
             and magnitudes[i] > magnitudes[i + 1]
         ):
             candidate_peaks.append(i)
@@ -135,7 +133,6 @@ def freq_from_fft(
         true_i = parabolic(np.log(magnitudes + 1e-10), peak_idx)[0]
         peak_freq = fs * true_i / len(windowed)
         
-        # Apply frequency range filter to exclude low-frequency noise and very high frequencies
         if peak_freq < min_freq or peak_freq > max_freq:
             continue
         
@@ -143,12 +140,10 @@ def freq_from_fft(
         width = calculate_peak_width(magnitudes, peak_idx)
         peak_mag = magnitudes[peak_idx]
 
-        # Apply prominence filter to remove weak peaks
         min_prominence = peak_mag * min_prominence_ratio
         if prominence < min_prominence:
             continue
 
-        # Apply width filter to remove overly broad peaks
         if width > max_width_bins:
             continue
 
@@ -157,8 +152,6 @@ def freq_from_fft(
                 "index": peak_idx,
                 "freq": peak_freq,
                 "magnitude": peak_mag,
-                "prominence": prominence,
-                "width": width,
             }
         )
 
@@ -181,10 +174,9 @@ def freq_from_fft(
 
         if not too_close:
             filtered_peaks.append(peak)
-            # print(f"magnitude: {peak['magnitude']}")
     
     if len(filtered_peaks) > 0:
-        filtered_peaks = [filtered_peaks[0]]  # Keep only the strongest peak
+        filtered_peaks = [filtered_peaks[0]]
     
     peaks = [p["freq"] for p in filtered_peaks]
 
@@ -205,59 +197,14 @@ def calculate_rms_volume(samples: np.ndarray) -> float:
         return -np.inf
     return 20 * np.log10(rms)
 
-def count_significant_peaks(
-    sig: np.ndarray,
-    fs: int = SAMPLE_RATE,
-    peak_threshold: float = 0.3,
-    min_freq: float = 50.0,
-    max_freq: float = 4000.0,
-    min_peak_separation_hz: float = 20.0,
-) -> int:
+def extract_peaks_from_chunk(samples: np.ndarray, chunk_ms: float = 50.0) -> List[float]:
+    """Extract peak frequencies from a single audio chunk using FFT."""
+    if len(samples) == 0:
+        return []
     
-    if len(sig) == 0:
-        return 0
+    peaks = freq_from_fft(samples, SAMPLE_RATE)
+    return peaks
 
-    windowed = sig * hanning(len(sig))
-    f = rfft(windowed)
-    magnitudes = np.abs(f)
-
-    if np.max(magnitudes) == 0:
-        return 0
-
-    magnitudes_norm = magnitudes / np.max(magnitudes)
-
-    freqs = np.fft.rfftfreq(len(windowed), 1.0 / fs)
-
-    freq_mask = (freqs >= min_freq) & (freqs <= max_freq)
-    magnitudes_filtered = magnitudes_norm[freq_mask]
-    freqs_filtered = freqs[freq_mask]
-
-    if len(magnitudes_filtered) < 3:
-        return 0
-
-    peaks = []
-    for i in range(1, len(magnitudes_filtered) - 1):
-
-        if (
-            magnitudes_filtered[i] > magnitudes_filtered[i - 1]
-            and magnitudes_filtered[i] > magnitudes_filtered[i + 1]
-            and magnitudes_filtered[i] >= peak_threshold
-        ):
-            peaks.append((freqs_filtered[i], magnitudes_filtered[i]))
-
-    if len(peaks) > 1:
-        peaks_sorted = sorted(peaks, key=lambda x: x[1], reverse=True)
-        filtered_peaks = [peaks_sorted[0]]
-
-        for freq, mag in peaks_sorted[1:]:
-
-            min_distance = min(abs(freq - fp[0]) for fp in filtered_peaks)
-            if min_distance > min_peak_separation_hz:
-                filtered_peaks.append((freq, mag))
-
-        return len(filtered_peaks)
-
-    return len(peaks)
 
 class ChannelToneDetector:
     def __init__(
@@ -270,11 +217,27 @@ class ChannelToneDetector:
     ):
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
-        self.audio_buffer: List[float] = []
-        self.mutex = threading.Lock()
-
+        
+        # Global array: 200 elements for 10s audio (50ms per element)
+        CHUNK_MS = 50.0
+        self.CHUNK_SIZE = int(SAMPLE_RATE * CHUNK_MS / 1000.0)
+        self.MAX_FREQUENCY_PEAKS_SIZE = 200  # 10s / 50ms = 200 elements
+        self.max_frequency_peaks: List[Optional[float]] = [None] * self.MAX_FREQUENCY_PEAKS_SIZE
+        self.max_frequency_peaks_mutex = threading.Lock()
+        self.max_frequency_peaks_index = 0  # Circular buffer index
+        
+        # Audio queue for Thread 1 (peak storage)
+        self.audio_queue = queue.Queue(maxsize=100)
+        
+        # Thread management
+        self.peak_storage_thread: Optional[threading.Thread] = None
+        self.tone_detection_thread: Optional[threading.Thread] = None
+        self.threads_running = threading.Event()
+        
+        # Frequency filters
         self.frequency_filters = frequency_filters or []
 
+        # New tone detection configuration
         if new_tone_config is None:
             new_tone_config = {
                 "detect_new_tones": False,
@@ -285,88 +248,325 @@ class ChannelToneDetector:
         self.new_tone_length_ms = new_tone_config.get("new_tone_length_ms", 1000)
         self.new_tone_length_seconds = self.new_tone_length_ms / 1000.0
         self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
-
-        self.new_tone_length_tolerance_ms = new_tone_config.get(
-            "new_tone_length_tolerance_ms", 50
-        )
-        self.new_tone_length_tolerance_seconds = (
-            self.new_tone_length_tolerance_ms / 1000.0
-        )
-
-        self.new_tone_consecutive_required = 3
         self.new_tone_config = new_tone_config
 
+        # Passthrough configuration
         if passthrough_config is None:
             passthrough_config = {"tone_passthrough": False, "passthrough_channel": ""}
         self.passthrough_config = passthrough_config
 
+        # Detection state
         self.last_detection_time: Dict[str, float] = {}
         for tone_def in tone_definitions:
             tone_id = tone_def["tone_id"]
             self.last_detection_time[tone_id] = 0.0
 
-        self.last_new_tone_detection_time = 0.0
-
-        self.new_tone_pair_count = 0
-        self.last_new_tone_pair: Optional[Dict[str, Any]] = None
-
-        self.last_detected_new_pair: Optional[Dict[str, Any]] = None
-
-        self.frequency_history: Dict[str, List[Dict[str, Any]]] = {}
-
-        self.stability_required_count = 2
-        self.stability_tolerance_hz = 10.0
-        self.stability_max_age_seconds = 0.3
+        self.last_new_tone_pair: Dict[str, Any] = {"tone_a": 0.0, "tone_b": 0.0}
+        self.last_tone_detection_time = 0.0
+        
+        # Similarity threshold (70%)
+        self.SIMILARITY_THRESHOLD = 0.45
+        
+        self.threads_running.set()
+        self._start_threads()
+    
+    def _start_threads(self):
+        """Start the two independent threads for tone detection."""
+        self.peak_storage_thread = threading.Thread(
+            target=self._peak_storage_worker,
+            name=f"PeakStorage-{self.channel_id}",
+            daemon=True
+        )
+        self.peak_storage_thread.start()
+        print(f"[TONE DETECT] Started peak storage thread for channel {self.channel_id}")
+        
+        self.tone_detection_thread = threading.Thread(
+            target=self._tone_detection_worker,
+            name=f"ToneDetection-{self.channel_id}",
+            daemon=True
+        )
+        self.tone_detection_thread.start()
+        print(f"[TONE DETECT] Started tone detection thread for channel {self.channel_id}")
+    
+    def _peak_storage_worker(self):
+        """Thread 1: Process 50ms audio windows and store max frequency peak in global array."""
+        chunk_buffer: List[float] = []
+        
+        while self.threads_running.is_set():
+            try:
+                try:
+                    audio_samples = self.audio_queue.get(timeout=0.1)
+                    chunk_buffer.extend(audio_samples.tolist())
+                except queue.Empty:
+                    continue
+                
+                while len(chunk_buffer) >= self.CHUNK_SIZE:
+                    chunk_samples = np.array(chunk_buffer[:self.CHUNK_SIZE], dtype=np.float32)
+                    chunk_buffer = chunk_buffer[self.CHUNK_SIZE:]
+                    
+                    peaks = extract_peaks_from_chunk(chunk_samples, 50.0)
+                    
+                    max_peak = None
+                    if peaks:
+                        max_peak = max(peaks)
+                    
+                    with self.max_frequency_peaks_mutex:
+                        self.max_frequency_peaks[self.max_frequency_peaks_index] = max_peak
+                        self.max_frequency_peaks_index = (self.max_frequency_peaks_index + 1) % self.MAX_FREQUENCY_PEAKS_SIZE
+                
+                self.audio_queue.task_done()
+                
+            except Exception as e:
+                print(f"[PEAK STORAGE] ERROR in peak storage worker for {self.channel_id}: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
+    
+    def _get_recent_peaks(self, num_elements: int) -> List[Optional[float]]:
+        """Get the most recent N elements from the circular buffer.
+        
+        Args:
+            num_elements: Number of elements to retrieve
+            
+        Returns:
+            List of frequency peaks (oldest first, newest last)
+        """
+        with self.max_frequency_peaks_mutex:
+            current_index = self.max_frequency_peaks_index
+            peaks = self.max_frequency_peaks
+            
+            # Limit to available elements
+            num_elements = min(num_elements, self.MAX_FREQUENCY_PEAKS_SIZE)
+            
+            result = []
+            # Get elements starting from (current_index - num_elements) backwards
+            for i in range(num_elements):
+                # Calculate index going backwards from current_index
+                idx = (current_index - num_elements + i) % self.MAX_FREQUENCY_PEAKS_SIZE
+                result.append(peaks[idx])
+            
+            return result
+    
+    def _tone_detection_worker(self):
+        """Thread 2: Check global array and calculate similarity percentages for tone detection."""
+        DETECTION_INTERVAL = 0.1
+        
+        while self.threads_running.is_set():
+            try:
+                time.sleep(DETECTION_INTERVAL)
+                
+                # Check defined tones
+                for tone_def in self.tone_definitions:
+                    tone_a_ms = tone_def.get('tone_a_length_ms', 1000)
+                    tone_b_ms = tone_def.get('tone_b_length_ms', 1000)
+                    tone_a_target = tone_def.get('tone_a', 0.0)
+                    tone_b_target = tone_def.get('tone_b', 0.0)
+                    tone_a_range = tone_def.get('tone_a_range', 10)
+                    tone_b_range = tone_def.get('tone_b_range', 10)
+                    
+                    # Calculate number of elements (50ms per element)
+                    elements_a = int(round(tone_a_ms / 50.0))
+                    elements_b = int(round(tone_b_ms / 50.0))
+                    total_elements = elements_a + elements_b
+                    
+                    # Get recent peaks
+                    recent_peaks = self._get_recent_peaks(total_elements)
+                    if len(recent_peaks) < total_elements:
+                        continue
+                    
+                    # Extract tone A and tone B elements (most recent is last)
+                    tone_a_elements = recent_peaks[-total_elements:-elements_b] if elements_b > 0 else recent_peaks[-elements_a:]
+                    tone_b_elements = recent_peaks[-elements_b:]
+                    
+                    # Calculate similarity percentages
+                    tone_a_similarity = self._calculate_similarity_percentage(
+                        tone_a_elements, tone_a_target, tone_a_range
+                    )
+                    tone_b_similarity = self._calculate_similarity_percentage(
+                        tone_b_elements, tone_b_target, tone_b_range
+                    )
+                    
+                    # Check if both tones meet 70% similarity threshold
+                    if tone_a_similarity >= self.SIMILARITY_THRESHOLD and tone_b_similarity >= self.SIMILARITY_THRESHOLD:
+                        # Prevent duplicate detections
+                        min_interval = (tone_a_ms + tone_b_ms) / 1000.0
+                        if time.time() - self.last_tone_detection_time < min_interval:
+                            continue
+                        
+                        # Get average frequencies
+                        tone_a_freq = self._get_average_frequency(tone_a_elements, tone_a_target, tone_a_range)
+                        tone_b_freq = self._get_average_frequency(tone_b_elements, tone_b_target, tone_b_range)
+                        
+                        # Apply frequency filters
+                        if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
+                            continue
+                        
+                        # Ensure tones are different
+                        if abs(tone_a_freq - tone_b_freq) <= 50:
+                            continue
+                        
+                        self.last_tone_detection_time = time.time()
+                        self._defined_tone_alert(tone_def, tone_a_freq, tone_b_freq)
+                        self._defined_tone_passthrough(tone_def)
+                        self._defined_tone_recording(tone_def)
+                
+                # Check for new tones
+                if self.detect_new_tones:
+                    elements_new = int(round(self.new_tone_length_ms / 50.0))
+                    total_elements_new = elements_new * 2
+                    
+                    recent_peaks = self._get_recent_peaks(total_elements_new)
+                    if len(recent_peaks) >= total_elements_new:
+                        # Extract two consecutive windows
+                        tone_a_elements = recent_peaks[-total_elements_new:-elements_new]
+                        tone_b_elements = recent_peaks[-elements_new:]
+                        
+                        # Find dominant frequency in each window
+                        tone_a_freq = self._get_dominant_frequency(tone_a_elements)
+                        tone_b_freq = self._get_dominant_frequency(tone_b_elements)
+                        
+                        if tone_a_freq and tone_b_freq:
+                            # Ensure tones are different
+                            if abs(tone_a_freq - tone_b_freq) <= 50:
+                                continue
+                            
+                            # Calculate similarity percentages using dominant frequencies
+                            tone_a_similarity = self._calculate_similarity_percentage(
+                                tone_a_elements, tone_a_freq, self.new_tone_range_hz
+                            )
+                            tone_b_similarity = self._calculate_similarity_percentage(
+                                tone_b_elements, tone_b_freq, self.new_tone_range_hz
+                            )
+                            # Check if both meet 70% similarity threshold
+                            if tone_a_similarity >= self.SIMILARITY_THRESHOLD and tone_b_similarity >= self.SIMILARITY_THRESHOLD:
+                                # Prevent duplicate detections
+                                min_interval = self.new_tone_length_seconds * 2 + 0.2
+                                if time.time() - self.last_tone_detection_time < min_interval:
+                                    continue
+                                
+                                # Apply frequency filters
+                                if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
+                                    continue
+                                
+                                self.last_tone_detection_time = time.time()
+                                
+                                print(
+                                    f"[NEW TONE PAIR] Channel {self.channel_id}: "
+                                    f"A={tone_a_freq:.1f} Hz, B={tone_b_freq:.1f} Hz "
+                                    f"(each {self.new_tone_length_seconds:.2f} s, "
+                                    f"±{self.new_tone_range_hz} Hz stable, "
+                                    f"similarity: A={tone_a_similarity:.1%}, B={tone_b_similarity:.1%})"
+                                )
+                                
+                                if MQTT_AVAILABLE:
+                                    publish_new_tone_pair(tone_a_freq, tone_b_freq)
+                
+            except Exception as e:
+                print(f"[TONE DETECTION] ERROR in tone detection worker for {self.channel_id}: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
+    
+    def _calculate_similarity_percentage(
+        self, elements: List[Optional[float]], target_freq: float, range_hz: float
+    ) -> float:
+        """Calculate the percentage of similar elements in the given list.
+        
+        Args:
+            elements: List of frequency values (or None)
+            target_freq: Target frequency to match against
+            range_hz: Frequency range tolerance
+        
+        Returns:
+            Similarity percentage (0.0 to 1.0)
+        """
+        if not elements:
+            return 0.0
+        
+        similar_count = 0
+        total_count = 0
+        
+        for freq in elements:
+            if freq is not None:
+                total_count += 1
+                if is_frequency_in_range(freq, target_freq, range_hz):
+                    similar_count += 1
+        
+        if total_count == 0:
+            return 0.0
+        
+        return similar_count / total_count
+    
+    def _get_average_frequency(
+        self, elements: List[Optional[float]], target_freq: float, range_hz: float
+    ) -> float:
+        """Get the average frequency of similar elements.
+        
+        Args:
+            elements: List of frequency values (or None)
+            target_freq: Target frequency to match against
+            range_hz: Frequency range tolerance
+        
+        Returns:
+            Average frequency of similar elements, or target_freq if none found
+        """
+        similar_freqs = []
+        for freq in elements:
+            if freq is not None:
+                if is_frequency_in_range(freq, target_freq, range_hz):
+                    similar_freqs.append(freq)
+        
+        if similar_freqs:
+            return sum(similar_freqs) / len(similar_freqs)
+        return target_freq
+    
+    def _get_dominant_frequency(self, elements: List[Optional[float]]) -> Optional[float]:
+        """Get the dominant (most common) frequency in the elements.
+        
+        Groups similar frequencies together and returns the most common one.
+        """
+        valid_freqs = [f for f in elements if f is not None]
+        if not valid_freqs:
+            return None
+        
+        groups = {}
+        for freq in valid_freqs:
+            found_group = False
+            for group_freq in groups.keys():
+                if abs(freq - group_freq) <= 10.0:
+                    groups[group_freq].append(freq)
+                    found_group = True
+                    break
+            
+            if not found_group:
+                groups[freq] = [freq]
+        
+        if not groups:
+            return None
+        
+        largest_group = max(groups.items(), key=lambda x: len(x[1]))
+        return sum(largest_group[1]) / len(largest_group[1])
+    
+    def stop_threads(self):
+        """Stop the two independent threads."""
+        self.threads_running.clear()
+        if self.peak_storage_thread and self.peak_storage_thread.is_alive():
+            self.peak_storage_thread.join(timeout=1.0)
+        if self.tone_detection_thread and self.tone_detection_thread.is_alive():
+            self.tone_detection_thread.join(timeout=1.0)
+        print(f"[TONE DETECT] Stopped threads for channel {self.channel_id}")
 
     def add_audio_samples(self, samples: np.ndarray):
-        
-        with self.mutex:
-
-            if len(samples) < 10000:
-
-                self.audio_buffer.extend(samples.tolist())
-            else:
-
-                chunk_size = 5000
-                for i in range(0, len(samples), chunk_size):
-                    chunk = samples[i:i + chunk_size]
-                    self.audio_buffer.extend(chunk.tolist())
-            if len(self.audio_buffer) > MAX_BUFFER_SAMPLES:
-                self.audio_buffer = self.audio_buffer[-MAX_BUFFER_SAMPLES:]
-
-    def _get_buffer_array(self) -> np.ndarray:
-        
-        with self.mutex:
-            buffer_copy = list(self.audio_buffer)
-
-        return np.array(buffer_copy, dtype=np.float32)
-
-    def _check_frequency_stability(
-        self, frequency: float, window_id: str, current_time: float
-    ) -> bool:
-        if window_id not in self.frequency_history:
-            self.frequency_history[window_id] = []
-
-        history = self.frequency_history[window_id]
-
-        history[:] = [
-            entry
-            for entry in history
-            if (current_time - entry["time"]) <= self.stability_max_age_seconds
-        ]
-
-        history.append({"freq": frequency, "time": current_time})
-
-        if len(history) < self.stability_required_count:
-            return False
-
-        recent_detections = history[-self.stability_required_count :]
-        frequencies = [d["freq"] for d in recent_detections]
-
-        mean_freq = np.mean(frequencies)
-        max_deviation = max(abs(f - mean_freq) for f in frequencies)
-
-        return max_deviation <= self.stability_tolerance_hz
+        """Add audio samples to the queue for Thread 1 (peak storage thread)."""
+        try:
+            self.audio_queue.put_nowait(samples)
+        except queue.Full:
+            # If queue is full, remove oldest item and add new one
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.put_nowait(samples)
+            except queue.Empty:
+                pass
 
     def _is_frequency_filtered(self, frequency: float) -> bool:
         
@@ -388,116 +588,8 @@ class ChannelToneDetector:
 
         return False
 
-    def _detect_defined_tone(self, tone_def: Dict[str, Any]) -> bool:
-        
-        import random
-
-        tone_a_length_seconds = tone_def["tone_a_length_ms"] / 1000.0
-        tone_b_length_seconds = tone_def["tone_b_length_ms"] / 1000.0
-
-        tone_a_samples = int(tone_a_length_seconds * SAMPLE_RATE)
-        tone_b_samples = int(tone_b_length_seconds * SAMPLE_RATE)
-        total_samples = tone_a_samples + tone_b_samples
-
-        with self.mutex:
-            buffer_len = len(self.audio_buffer)
-
-        if buffer_len < total_samples:
-            # if random.randint(1, 100) == 1:
-            #     print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_def['tone_id']}: Buffer too small - {buffer_len} samples (need {total_samples})")
-            return False
-
-        with self.mutex:
-            recent_samples_list = self.audio_buffer[-total_samples:]
-
-        recent_samples = np.array(recent_samples_list, dtype=np.float32)
-        volume_db = calculate_rms_volume(recent_samples)
-
-        # Skip tone detection if audio is too quiet (empty/silent audio)
-        MIN_VOLUME_THRESHOLD_DB = -30.0
-        if volume_db < MIN_VOLUME_THRESHOLD_DB:
-            if random.randint(1, 100) == 1:
-                print(f"[TONE DETECT] Channel {self.channel_id}: Volume too low ({volume_db:.1f} dB < {MIN_VOLUME_THRESHOLD_DB} dB), skipping tone detection")
-            return False
-
-        if random.randint(1, 50) == 1:
-            print(f"[TONE DETECT] Channel {self.channel_id}: Volume={volume_db:.1f} dB (threshold={MIN_VOLUME_THRESHOLD_DB}dB)")
-
-        tone_id = tone_def["tone_id"]
-        current_time = time.time()
-        time_since_last = current_time - self.last_detection_time.get(tone_id, 0)
-        if time_since_last < MIN_DETECTION_INTERVAL_SECONDS:
-            # if random.randint(1, 50) == 1:
-            #     print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Too soon since last detection - {time_since_last:.1f}s (min {MIN_DETECTION_INTERVAL_SECONDS}s)")
-            return False
-
-        try:
-
-            buffer_end_samples = len(self.audio_buffer)
-            tone_a_end_samples = buffer_end_samples - (total_samples - tone_a_samples)
-            tone_b_end_samples = buffer_end_samples
-            tone_a_position_seconds = tone_a_end_samples / SAMPLE_RATE
-            tone_b_position_seconds = tone_b_end_samples / SAMPLE_RATE
-
-            tone_a_window = recent_samples[0:tone_a_samples]
-            tone_a_peaks = freq_from_fft(tone_a_window, SAMPLE_RATE, tone_a_position_seconds)
-
-            if len(tone_a_peaks) != 1:
-                return False
-
-            tone_a_freq = tone_a_peaks[0]
-
-            tone_b_window = recent_samples[tone_a_samples:]
-            tone_b_peaks = freq_from_fft(tone_b_window, SAMPLE_RATE, tone_b_position_seconds)
-
-            if len(tone_b_peaks) != 1:
-                return False
-
-            tone_b_freq = tone_b_peaks[0]
-
-            if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
-                return False
-
-            tone_a_match = is_frequency_in_range(
-                tone_a_freq, tone_def["tone_a"], tone_def.get("tone_a_range", 10)
-            )
-            tone_b_match = is_frequency_in_range(
-                tone_b_freq, tone_def["tone_b"], tone_def.get("tone_b_range", 10)
-            )
-
-            detected_tone_a_duration_ms = (tone_a_samples / SAMPLE_RATE) * 1000.0
-            detected_tone_b_duration_ms = (tone_b_samples / SAMPLE_RATE) * 1000.0
-            tone_a_duration_match = abs(detected_tone_a_duration_ms - tone_def["tone_a_length_ms"]) <= DURATION_TOLERANCE_MS
-            tone_b_duration_match = abs(detected_tone_b_duration_ms - tone_def["tone_b_length_ms"]) <= DURATION_TOLERANCE_MS
-
-            if not (tone_a_match and tone_b_match and tone_a_duration_match and tone_b_duration_match):
-
-                mismatch_details = []
-                if not tone_a_match:
-                    diff_a = abs(tone_a_freq - tone_def["tone_a"])
-                    mismatch_details.append(f"A: {tone_a_freq:.1f}Hz (target {tone_def['tone_a']:.1f}Hz±{tone_def.get('tone_a_range', 10)}, diff={diff_a:.1f}Hz)")
-                if not tone_b_match:
-                    diff_b = abs(tone_b_freq - tone_def["tone_b"])
-                    mismatch_details.append(f"B: {tone_b_freq:.1f}Hz (target {tone_def['tone_b']:.1f}Hz±{tone_def.get('tone_b_range', 10)}, diff={diff_b:.1f}Hz)")
-                if not tone_a_duration_match:
-                    diff_dur_a = abs(detected_tone_a_duration_ms - tone_def["tone_a_length_ms"])
-                    mismatch_details.append(f"A duration: {detected_tone_a_duration_ms:.1f}ms (target {tone_def['tone_a_length_ms']}ms±{DURATION_TOLERANCE_MS}ms, diff={diff_dur_a:.1f}ms)")
-                if not tone_b_duration_match:
-                    diff_dur_b = abs(detected_tone_b_duration_ms - tone_def["tone_b_length_ms"])
-                    mismatch_details.append(f"B duration: {detected_tone_b_duration_ms:.1f}ms (target {tone_def['tone_b_length_ms']}ms±{DURATION_TOLERANCE_MS}ms, diff={diff_dur_b:.1f}ms)")
-                # print(f"[TONE DETECT DEBUG] Channel {self.channel_id} Tone {tone_id}: Stable frequencies but mismatch - {', '.join(mismatch_details)}")
-                return False
-
-            if tone_a_match and tone_b_match and tone_a_duration_match and tone_b_duration_match:
-
-                self.last_detection_time[tone_id] = current_time
-
-                window_id_a = f"{tone_id}_tone_a"
-                window_id_b = f"{tone_id}_tone_b"
-                self.frequency_history.pop(window_id_a, None)
-                self.frequency_history.pop(window_id_b, None)
-
-                confirmation_log = (
+    def _defined_tone_alert(self, tone_def: Dict[str, Any], tone_a_freq: float, tone_b_freq: float):
+        confirmation_log = (
                     "\n"
                     + "=" * 80
                     + "\n"
@@ -512,270 +604,91 @@ class ChannelToneDetector:
                     + f"    Detected:     {tone_a_freq:.1f} Hz\n"
                     + f"    Target:       {tone_def['tone_a']:.1f} Hz "
                     f"±{tone_def.get('tone_a_range', 10)} Hz\n"
-                    + f"    Duration:     {detected_tone_a_duration_ms:.1f} ms "
-                    f"(target: {tone_def['tone_a_length_ms']} ms, "
+                    + f"    Duration:     (target: {tone_def['tone_a_length_ms']} ms, "
                     f"tolerance: ±{DURATION_TOLERANCE_MS} ms)\n"
                     + "  \n"
                     + "  Tone B Details:\n"
                     + f"    Detected:     {tone_b_freq:.1f} Hz\n"
                     + f"    Target:       {tone_def['tone_b']:.1f} Hz "
                     f"±{tone_def.get('tone_b_range', 10)} Hz\n"
-                    + f"    Duration:     {detected_tone_b_duration_ms:.1f} ms "
-                    f"(target: {tone_def['tone_b_length_ms']} ms, "
+                    + f"    Duration:     (target: {tone_def['tone_b_length_ms']} ms, "
                     f"tolerance: ±{DURATION_TOLERANCE_MS} ms)\n"
                     + "  \n"
                     + "  Record Length:  "
                     f"{tone_def.get('record_length_ms', 0)} ms\n"
                 )
-                if tone_def.get("detection_tone_alert"):
-                    confirmation_log += (
-                        f"  Alert Type:     " f"{tone_def['detection_tone_alert']}\n"
-                    )
-                confirmation_log += "=" * 80 + "\n"
-                print(confirmation_log, flush=True)
+        confirmation_log += "=" * 80 + "\n"
+        print(confirmation_log, flush=True)
 
-                if MQTT_AVAILABLE:
-                    publish_known_tone_detection(
-                        tone_id=tone_def["tone_id"],
-                        tone_a_hz=tone_def["tone_a"],
-                        tone_b_hz=tone_def["tone_b"],
-                        tone_a_duration_ms=tone_def["tone_a_length_ms"],
-                        tone_b_duration_ms=tone_def["tone_b_length_ms"],
-                        tone_a_range_hz=tone_def.get("tone_a_range", 10),
-                        tone_b_range_hz=tone_def.get("tone_b_range", 10),
-                        channel_id=self.channel_id,
-                        record_length_ms=tone_def.get("record_length_ms", 0),
-                        detection_tone_alert=tone_def.get("detection_tone_alert"),
-                    )
-
-                try:
-                    from passthrough import global_passthrough_manager
-
-                    if self.passthrough_config.get("tone_passthrough", False):
-                        target_channel = self.passthrough_config.get(
-                            "passthrough_channel", ""
-                        )
-                        record_length_ms = tone_def.get("record_length_ms", 0)
-                        if target_channel and record_length_ms > 0:
-                            global_passthrough_manager.start_passthrough(
-                                self.channel_id, target_channel, record_length_ms
-                            )
-                            print(
-                                f"[PASSTHROUGH] Triggered: "
-                                f"{self.channel_id} -> {target_channel}, "
-                                f"duration={record_length_ms} ms"
-                            )
-                except Exception as e:
-                    print(
-                        f"[PASSTHROUGH] ERROR: Failed to trigger " f"passthrough: {e}"
-                    )
-
-                try:
-                    from recording import global_recording_manager
-
-                    record_length_ms = tone_def.get("record_length_ms", 0)
-                    if record_length_ms > 0:
-                        global_recording_manager.start_recording(
-                            self.channel_id,
-                            "defined",
-                            tone_def["tone_a"],
-                            tone_def["tone_b"],
-                            record_length_ms,
-                        )
-                except Exception as e:
-                    print(f"[RECORDING] ERROR: Failed to start " f"recording: {e}")
-
-                return True
-
-        except Exception as e:
-            print(f"[TONE DETECTION] ERROR in defined tone detection: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-        return False
-
-    def _detect_new_tone_pair(self) -> bool:
-        
-        if not self.detect_new_tones:
-            return False
-
-        max_tone_duration = (
-            self.new_tone_length_seconds + self.new_tone_length_tolerance_seconds
-        )
-        max_tone_samples = int(max_tone_duration * SAMPLE_RATE)
-        total_samples = 2 * max_tone_samples
-
-        with self.mutex:
-            buffer_len = len(self.audio_buffer)
-
-        if buffer_len < total_samples:
-            return False
-
-        current_time = time.time()
-        time_since_last = current_time - self.last_new_tone_detection_time
-        if time_since_last < MIN_DETECTION_INTERVAL_SECONDS:
-            return False
-
-        with self.mutex:
-            recent_samples_list = self.audio_buffer[-total_samples:]
-
-        recent_samples = np.array(recent_samples_list, dtype=np.float32)
-        
-        # Skip tone detection if audio is too quiet (empty/silent audio)
-        volume_db = calculate_rms_volume(recent_samples)
-        MIN_VOLUME_THRESHOLD_DB = -30.0
-        if volume_db < MIN_VOLUME_THRESHOLD_DB:
-            return False
-
-        try:
-            target_tone_samples = int(self.new_tone_length_seconds * SAMPLE_RATE)
-            window1 = recent_samples[0:target_tone_samples]
-            
-            peaks1 = freq_from_fft(window1, SAMPLE_RATE)
-            
-            if len(peaks1) != 1:
-                return False
-
-            tone_a_freq = peaks1[0]
-            
-            window2 = recent_samples[target_tone_samples:]
-            peaks2 = freq_from_fft(window2, SAMPLE_RATE)
-
-            if len(peaks2) != 1:
-                return False
-
-            tone_b_freq = peaks2[0]
-
-            # print(f"tone_a_freq: {tone_a_freq}, tone_b_freq: {tone_b_freq}")
-
-            if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
-                return False
-
-            if abs(tone_a_freq - tone_b_freq) <= 50:
-                return False
-
-            is_known_tone = False
-            for tone_def in self.tone_definitions:
-                if (
-                    is_frequency_in_range(
-                        tone_a_freq,
-                        tone_def["tone_a"],
-                        tone_def.get("tone_a_range", 10),
-                    )
-                    or is_frequency_in_range(
-                        tone_a_freq,
-                        tone_def["tone_b"],
-                        tone_def.get("tone_b_range", 10),
-                    )
-                    or is_frequency_in_range(
-                        tone_b_freq,
-                        tone_def["tone_a"],
-                        tone_def.get("tone_a_range", 10),
-                    )
-                    or is_frequency_in_range(
-                        tone_b_freq,
-                        tone_def["tone_b"],
-                        tone_def.get("tone_b_range", 10),
-                    )
-                ):
-                    is_known_tone = True
-                    break
-
-            if is_known_tone:
-                return False
-
-            current_pair = {
-                "tone_a": int(tone_a_freq),
-                "tone_b": int(tone_b_freq),
-                "tone_a_length": self.new_tone_length_seconds,
-                "tone_b_length": self.new_tone_length_seconds,
-            }
-
-            if self.last_new_tone_pair is None:
-                self.new_tone_pair_count = 0
-                self.last_new_tone_pair = current_pair
-            elif self.last_new_tone_pair == current_pair:
-                if self.new_tone_pair_count < self.new_tone_consecutive_required:
-                    self.new_tone_pair_count += 1
-                    return False
-            else:
-
-                self.new_tone_pair_count = 0
-                self.last_new_tone_pair = current_pair
-                return False
-
-            self.last_new_tone_detection_time = current_time
-            self.new_tone_pair_count = 0
-
-            self.frequency_history.pop("new_tone_window1", None)
-            self.frequency_history.pop("new_tone_window2", None)
-
-            self.last_detected_new_pair = {
-                "tone_a": tone_a_freq,
-                "tone_b": tone_b_freq,
-                "tone_a_length_ms": int(self.new_tone_length_seconds * 1000),
-                "tone_b_length_ms": int(self.new_tone_length_seconds * 1000),
-            }
-
-            self.last_new_tone_pair = None
-
-            print(
-                f"[NEW TONE PAIR] Channel {self.channel_id}: "
-                f"A={tone_a_freq:.1f} Hz, B={tone_b_freq:.1f} Hz "
-                f"(each {self.new_tone_length_seconds:.2f} s, "
-                f"±{self.new_tone_range_hz} Hz stable)"
+        if MQTT_AVAILABLE:
+            publish_known_tone_detection(
+                tone_id=tone_def["tone_id"],
+                tone_a_hz=tone_def["tone_a"],
+                tone_b_hz=tone_def["tone_b"],
+                tone_a_duration_ms=tone_def["tone_a_length_ms"],
+                tone_b_duration_ms=tone_def["tone_b_length_ms"],
+                tone_a_range_hz=tone_def.get("tone_a_range", 10),
+                tone_b_range_hz=tone_def.get("tone_b_range", 10),
+                channel_id=self.channel_id,
+                record_length_ms=tone_def.get("record_length_ms", 0),
+                detection_tone_alert=tone_def.get("detection_tone_alert"),
             )
 
-            if MQTT_AVAILABLE:
-                publish_new_tone_pair(tone_a_freq, tone_b_freq)
+    def _defined_tone_passthrough(self, tone_def: Dict[str, Any]):
 
-            return True
+        try:
+            from passthrough import global_passthrough_manager
 
+            if self.passthrough_config.get("tone_passthrough", False):
+                target_channel = self.passthrough_config.get(
+                    "passthrough_channel", ""
+                )
+                record_length_ms = tone_def.get("record_length_ms", 0)
+                if target_channel and record_length_ms > 0:
+                    global_passthrough_manager.start_passthrough(
+                        self.channel_id, target_channel, record_length_ms
+                    )
+                    print(
+                        f"[PASSTHROUGH] Triggered: "
+                        f"{self.channel_id} -> {target_channel}, "
+                        f"duration={record_length_ms} ms"
+                    )
         except Exception as e:
-            print(f"[TONE DETECTION] ERROR in new tone detection: {e}")
-            import traceback
+            print(
+                f"[PASSTHROUGH] ERROR: Failed to trigger " f"passthrough: {e}"
+            )
 
-            traceback.print_exc()
+    def _defined_tone_recording(self, tone_def: Dict[str, Any]):
 
-        return False
+        try:
+            from recording import global_recording_manager
 
-    def process_audio(self) -> Optional[Dict[str, Any]]:
-        
-        import random
+            record_length_ms = tone_def.get("record_length_ms", 0)
+            if record_length_ms > 0:
+                global_recording_manager.start_recording(
+                    self.channel_id,
+                    "defined",
+                    tone_def["tone_a"],
+                    tone_def["tone_b"],
+                    record_length_ms,
+                )
+        except Exception as e:
+            print(f"[RECORDING] ERROR: Failed to start " f"recording: {e}")
 
-        with self.mutex:
-            buffer_len = len(self.audio_buffer)
-            
-            # Quick volume check - skip if buffer is empty or too small
-            if buffer_len < 1000:  # Need at least some samples
-                return None
-            
-            # Check volume of recent audio to skip empty/silent audio
-            recent_samples_list = self.audio_buffer[-min(48000, buffer_len):]  # Last 1 second or all if less
-
-        recent_samples = np.array(recent_samples_list, dtype=np.float32)
-        volume_db = calculate_rms_volume(recent_samples)
-        
-        # Skip tone detection if audio is too quiet (empty/silent audio)
-        MIN_VOLUME_THRESHOLD_DB = -30.0
-        if volume_db < MIN_VOLUME_THRESHOLD_DB:
-            return None
-
-        if random.randint(1, 100) == 1:
-            print(f"[TONE DETECT DEBUG] Channel {self.channel_id}: process_audio() called - buffer={buffer_len} samples, volume={volume_db:.1f} dB, {len(self.tone_definitions)} tone definition(s)")
-
-        for tone_def in self.tone_definitions:
-            if self._detect_defined_tone(tone_def):
-                return tone_def
-
-        if self.detect_new_tones:
-            self._detect_new_tone_pair()
-
-        return None
 
 _channel_detectors: Dict[str, ChannelToneDetector] = {}
 _detectors_mutex = threading.Lock()
+
+def stop_all_detectors():
+    """Stop all tone detection threads for graceful shutdown."""
+    with _detectors_mutex:
+        for channel_id, detector in _channel_detectors.items():
+            try:
+                detector.stop_threads()
+                print(f"[TONE DETECTION] Stopped threads for channel {channel_id}")
+            except Exception as e:
+                print(f"[TONE DETECTION] ERROR stopping threads for {channel_id}: {e}")
+        _channel_detectors.clear()
 
 def init_channel_detector(
     channel_id: str,
@@ -828,7 +741,9 @@ def init_channel_detector(
                     f"    Record Length: " f"{tone_def.get('record_length_ms', 0)} ms"
                 )
         else:
-            _channel_detectors.pop(channel_id, None)
+            old_detector = _channel_detectors.pop(channel_id, None)
+            if old_detector:
+                old_detector.stop_threads()
             print(
                 f"[TONE DETECTION] No tone definitions found for "
                 f"channel {channel_id}"
@@ -836,12 +751,11 @@ def init_channel_detector(
 
 def add_audio_samples_for_channel(channel_id: str, filtered_audio: np.ndarray) -> None:
     
-    # Optionally send to visualizer if available
     try:
         from audio_visualizer import add_audio_to_visualizer
         add_audio_to_visualizer(channel_id, filtered_audio)
     except ImportError:
-        pass  # Visualizer not available, continue normally
+        pass
     
     with _detectors_mutex:
         detector = _channel_detectors.get(channel_id)
@@ -851,12 +765,13 @@ def add_audio_samples_for_channel(channel_id: str, filtered_audio: np.ndarray) -
 def process_audio_for_channel(
     channel_id: str, filtered_audio: np.ndarray
 ) -> Optional[Dict[str, Any]]:
-    
+    """Add audio samples for processing. Detection is handled by background threads."""
     with _detectors_mutex:
         detector = _channel_detectors.get(channel_id)
         if not detector:
             return None
 
     detector.add_audio_samples(filtered_audio)
-
-    return detector.process_audio()
+    
+    # Detection is now handled by background threads, so return None
+    return None

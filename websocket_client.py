@@ -45,9 +45,16 @@ async def connect_to_server_async(url: str) -> bool:
 
     global global_ws_client, ws_connected, ws_url
 
+    # Close existing connection if it exists before creating a new one
     if global_ws_client is not None:
-        print("[WEBSOCKET] Already connected to WebSocket server")
-        return True
+        try:
+            print("[WEBSOCKET] Closing existing connection before reconnecting...")
+            await global_ws_client.close()
+        except Exception as e:
+            print(f"[WEBSOCKET] WARNING: Error closing existing connection: {e}")
+        finally:
+            global_ws_client = None
+            ws_connected = False
 
     try:
         print(f"[WEBSOCKET] Connecting to: {url}")
@@ -120,19 +127,34 @@ async def disconnect_async():
 
 
 def disconnect():
-    global global_ws_client
+    global global_ws_client, ws_event_loop
 
     if global_ws_client is None:
         return
 
     try:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(disconnect_async())
-    except RuntimeError:
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(disconnect_async())
+        # Prefer using the WebSocket event loop if it exists and is running
+        if ws_event_loop is not None and ws_event_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(disconnect_async(), ws_event_loop)
+            future.result(timeout=5.0)
+        else:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(disconnect_async(), loop)
+                    future.result(timeout=5.0)
+                else:
+                    loop.run_until_complete(disconnect_async())
+            except RuntimeError:
+                # No event loop in current thread, create a new one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(disconnect_async())
+                finally:
+                    loop.close()
+    except asyncio.TimeoutError:
+        print("[WEBSOCKET] WARNING: Disconnect timeout (non-critical)")
     except Exception as e:
         print(f"[WEBSOCKET] ERROR: Exception in disconnect: {e}")
     finally:
@@ -494,6 +516,16 @@ async def websocket_handler_async(url: str):
     while not global_interrupted.is_set():
         try:
             if global_ws_client is None or not ws_connected:
+                # Ensure old connection is fully closed before reconnecting
+                if global_ws_client is not None:
+                    try:
+                        await global_ws_client.close()
+                    except Exception:
+                        pass
+                    finally:
+                        global_ws_client = None
+                        ws_connected = False
+                
                 print(f"[WEBSOCKET] Connection lost, attempting to reconnect in {reconnect_delay:.1f}s...")
                 await asyncio.sleep(reconnect_delay)
 
@@ -663,8 +695,16 @@ async def websocket_handler_async(url: str):
                     continue
                 except websockets.exceptions.ConnectionClosed:
                     print("[WEBSOCKET] Connection closed by server")
+                    # Connection already closed by server, just clean up our reference
+                    if global_ws_client is not None:
+                        try:
+                            # Connection is already closed, but ensure we clean up
+                            pass
+                        except Exception:
+                            pass
+                        finally:
+                            global_ws_client = None
                     ws_connected = False
-                    global_ws_client = None
                     break
                 except Exception as e:
                     if not global_interrupted.is_set():
@@ -672,8 +712,15 @@ async def websocket_handler_async(url: str):
                         import traceback
 
                         traceback.print_exc()
+                        # Try to close the connection before cleaning up
+                        if global_ws_client is not None:
+                            try:
+                                await global_ws_client.close()
+                            except Exception:
+                                pass
+                            finally:
+                                global_ws_client = None
                         ws_connected = False
-                        global_ws_client = None
                         break
 
         except Exception as e:
@@ -682,8 +729,15 @@ async def websocket_handler_async(url: str):
                 import traceback
 
                 traceback.print_exc()
+                # Try to close the connection before cleaning up
+                if global_ws_client is not None:
+                    try:
+                        await global_ws_client.close()
+                    except Exception:
+                        pass
+                    finally:
+                        global_ws_client = None
                 ws_connected = False
-                global_ws_client = None
                 reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
     ws_connected = False
