@@ -153,6 +153,20 @@ def freq_from_fft(
     if max_magnitude == 0:
         return []
     
+    # Convert to dB for threshold checking (matching Android approach)
+    magnitudes_db = 20 * np.log10(magnitudes + 1e-10)
+    max_magnitude_db = 20 * np.log10(max_magnitude + 1e-10)
+    
+    # Apply minimum threshold (matching Android: 20*log10(0.125/32768) ≈ -88.3 dB)
+    # This prevents noise from being detected as tones
+    min_db_threshold = 20 * np.log10(0.125 / 32768)  # Android's minimum threshold
+    if max_magnitude_db < min_db_threshold:
+        return []  # Signal too weak, likely just noise
+    
+    # Apply magnitude threshold in linear scale
+    if max_magnitude < magnitude_threshold:
+        return []  # Signal below magnitude threshold
+    
     signal_rms = np.sqrt(np.mean(sig**2))
     if signal_rms < 1e-6:
         return []
@@ -163,17 +177,15 @@ def freq_from_fft(
             magnitudes[i] > magnitudes[i - 1]
             and magnitudes[i] > magnitudes[i + 1]
         ):
-            candidate_peaks.append(i)
+            # Additional check: peak must be above minimum dB threshold
+            # This filters out noise peaks before processing
+            if magnitudes_db[i] > min_db_threshold:
+                candidate_peaks.append(i)
 
     if len(candidate_peaks) == 0:
         return []
     
     peak_data = []
-    fft_len = len(magnitudes)
-
-    # Convert magnitudes to dB for interpolation (matching Android approach)
-    # Use small epsilon to avoid log(0)
-    magnitudes_db = 20 * np.log10(magnitudes + 1e-10)
 
     for peak_idx in candidate_peaks:
         # Bounds checking (matching Android approach)
@@ -197,6 +209,10 @@ def freq_from_fft(
         prominence = calculate_peak_prominence(magnitudes, peak_idx)
         width = calculate_peak_width(magnitudes, peak_idx)
         peak_mag = magnitudes[peak_idx]
+        
+        # Apply magnitude threshold check (matching Android approach)
+        if peak_mag < magnitude_threshold:
+            continue
 
         min_prominence = peak_mag * min_prominence_ratio
         if prominence < min_prominence:
