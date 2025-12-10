@@ -33,12 +33,49 @@ MIN_DETECTION_INTERVAL_SECONDS = 2.0
 DURATION_TOLERANCE_MS = 0
 
 def parabolic(f, x):
+    """
+    Quadratic interpolation for peak refinement (matching Android STFT approach).
+    Fits a parabola through three points: (x-1, f[x-1]), (x, f[x]), (x+1, f[x+1])
+    Returns the interpolated peak position and value.
     
+    Formula matches Android: xPeak = -b/(2*a) where:
+    a = (f[x+1] + f[x-1])/2 - f[x]
+    b = (f[x+1] - f[x-1])/2
+    """
     if x == 0 or x == len(f) - 1:
         return float(x), float(f[x])
     try:
-        xv = 1 / 2.0 * (f[x - 1] - f[x + 1]) / (f[x - 1] - 2 * f[x] + f[x + 1]) + x
-        yv = f[x] - 1 / 4.0 * (f[x - 1] - f[x + 1]) * (xv - x)
+        x1 = f[x - 1]
+        x2 = f[x]
+        x3 = f[x + 1]
+        
+        # Match Android's quadratic interpolation formula
+        # a*x^2 + b*x + c = y
+        # where: a - b + c = x1, c = x2, a + b + c = x3
+        c = x2
+        a = (x3 + x1) / 2.0 - x2
+        b = (x3 - x1) / 2.0
+        
+        if abs(a) < 1e-10:  # Avoid division by zero (flat line)
+            return float(x), float(f[x])
+        
+        # Ensure it's a peak (parabola opens downward), not a valley (matching Android)
+        if a >= 0:
+            return float(x), float(f[x])
+        
+        # Calculate peak position offset from center bin
+        xPeak = -b / (2.0 * a)
+        
+        # Ensure the peak is within reasonable bounds (within 1 bin, matching Android)
+        if abs(xPeak) >= 1.0:
+            return float(x), float(f[x])
+        
+        # Calculate interpolated peak value
+        yv = (4 * a * c - b * b) / (4 * a)
+        
+        # Return absolute position (x + offset)
+        xv = x + xPeak
+        
         return xv, yv
     except (ZeroDivisionError, IndexError):
         return float(x), float(f[x])
@@ -134,9 +171,25 @@ def freq_from_fft(
     peak_data = []
     fft_len = len(magnitudes)
 
+    # Convert magnitudes to dB for interpolation (matching Android approach)
+    # Use small epsilon to avoid log(0)
+    magnitudes_db = 20 * np.log10(magnitudes + 1e-10)
+
     for peak_idx in candidate_peaks:
-        true_i = parabolic(np.log(magnitudes + 1e-10), peak_idx)[0]
-        peak_freq = true_i * fs / N
+        # Bounds checking (matching Android approach)
+        # Ensure we're not at the edges and can interpolate
+        if peak_idx < 1 or peak_idx >= len(magnitudes_db) - 1:
+            # Can't interpolate at edges, use direct calculation
+            peak_freq = peak_idx * fs / N
+        else:
+            # Use dB values for interpolation (matching Android STFT approach)
+            true_i, _ = parabolic(magnitudes_db, peak_idx)
+            peak_freq = true_i * fs / N
+            
+            # Verify interpolation result is reasonable (within 1 bin, matching Android)
+            if abs(true_i - peak_idx) >= 1.0:
+                # Interpolation gave unreasonable result, use direct calculation
+                peak_freq = peak_idx * fs / N
         
         if peak_freq < min_freq or peak_freq > max_freq:
             continue
