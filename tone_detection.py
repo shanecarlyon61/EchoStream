@@ -44,7 +44,7 @@ def parabolic(f, x):
         return float(x), float(f[x])
 
 def calculate_peak_prominence(
-    magnitudes: np.ndarray, peak_idx: int, window_size: int = 5
+    magnitudes: np.ndarray, peak_idx: int, window_size: int = 25
 ) -> float:
     
     peak_mag = magnitudes[peak_idx]
@@ -105,8 +105,11 @@ def freq_from_fft(
     if len(sig) == 0:
         return []
 
-    windowed = sig * hanning(len(sig))
-    f = rfft(windowed)
+    N = len(sig)
+    window = hanning(N)
+    windowed = sig * window
+    scaling = np.sum(window) / N
+    f = rfft(windowed) / scaling
 
     magnitudes = np.abs(f)
     max_magnitude = np.max(magnitudes)
@@ -129,9 +132,11 @@ def freq_from_fft(
         return []
     
     peak_data = []
+    fft_len = len(magnitudes)
+
     for peak_idx in candidate_peaks:
         true_i = parabolic(np.log(magnitudes + 1e-10), peak_idx)[0]
-        peak_freq = fs * true_i / len(windowed)
+        peak_freq = true_i * fs / N
         
         if peak_freq < min_freq or peak_freq > max_freq:
             continue
@@ -161,7 +166,7 @@ def freq_from_fft(
     peak_data.sort(key=lambda x: x["magnitude"], reverse=True)
 
     filtered_peaks = []
-    min_separation_bins = int((min_separation_hz * len(windowed)) / fs)
+    min_separation_bins = max(1, int((min_separation_hz * N) / fs))
 
     for peak in peak_data:
 
@@ -197,13 +202,30 @@ def calculate_rms_volume(samples: np.ndarray) -> float:
         return -np.inf
     return 20 * np.log10(rms)
 
-def extract_peaks_from_chunk(samples: np.ndarray, chunk_ms: float = 50.0) -> List[float]:
+def extract_peaks_from_chunk(samples: np.ndarray, chunk_ms: float = 100.0) -> List[float]:
     """Extract peak frequencies from a single audio chunk using FFT."""
     if len(samples) == 0:
         return []
     
     peaks = freq_from_fft(samples, SAMPLE_RATE)
     return peaks
+
+
+def calculate_fft_resolution_hz(window_size_samples: int, sample_rate: int = SAMPLE_RATE) -> float:
+    
+    if window_size_samples <= 0:
+        return float("inf")
+    return sample_rate / window_size_samples
+
+
+def calculate_default_range_hz(
+    window_size_samples: int,
+    sample_rate: int = SAMPLE_RATE,
+    multiplier: float = 1.5,
+) -> float:
+    
+    resolution = calculate_fft_resolution_hz(window_size_samples, sample_rate)
+    return resolution * multiplier
 
 
 class ChannelToneDetector:
@@ -218,10 +240,12 @@ class ChannelToneDetector:
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
         
-        # Global array: 200 elements for 10s audio (50ms per element)
-        CHUNK_MS = 50.0
-        self.CHUNK_SIZE = int(SAMPLE_RATE * CHUNK_MS / 1000.0)
-        self.MAX_FREQUENCY_PEAKS_SIZE = 200  # 10s / 50ms = 200 elements
+        # Global array: 100 elements for 10s audio (100ms per element)
+        self.CHUNK_MS = 100.0
+        self.CHUNK_SIZE = int(SAMPLE_RATE * self.CHUNK_MS / 1000.0)
+        self.MAX_FREQUENCY_PEAKS_SIZE = max(
+            1, int((MAX_BUFFER_SECONDS * 1000) / self.CHUNK_MS)
+        )
         self.max_frequency_peaks: List[Optional[float]] = [None] * self.MAX_FREQUENCY_PEAKS_SIZE
         self.max_frequency_peaks_mutex = threading.Lock()
         self.max_frequency_peaks_index = 0  # Circular buffer index
@@ -250,6 +274,21 @@ class ChannelToneDetector:
         self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
         self.new_tone_config = new_tone_config
 
+        self.fft_resolution_hz = calculate_fft_resolution_hz(
+            self.CHUNK_SIZE, SAMPLE_RATE
+        )
+        self.default_range_hz = calculate_default_range_hz(
+            self.CHUNK_SIZE, SAMPLE_RATE, multiplier=1.5
+        )
+
+        if self.new_tone_range_hz < self.default_range_hz:
+            print(
+                f"[TONE DETECTION] Adjusting new_tone_range_hz from "
+                f"{self.new_tone_range_hz:.1f} to {self.default_range_hz:.1f} Hz "
+                f"(FFT resolution: {self.fft_resolution_hz:.1f} Hz)"
+            )
+            self.new_tone_range_hz = self.default_range_hz
+
         # Passthrough configuration
         if passthrough_config is None:
             passthrough_config = {"tone_passthrough": False, "passthrough_channel": ""}
@@ -265,7 +304,7 @@ class ChannelToneDetector:
         self.last_tone_detection_time = 0.0
         
         # Similarity threshold (70%)
-        self.SIMILARITY_THRESHOLD = 0.45
+        self.SIMILARITY_THRESHOLD = 0.30
         
         self.threads_running.set()
         self._start_threads()
@@ -289,7 +328,7 @@ class ChannelToneDetector:
         print(f"[TONE DETECT] Started tone detection thread for channel {self.channel_id}")
     
     def _peak_storage_worker(self):
-        """Thread 1: Process 50ms audio windows and store max frequency peak in global array."""
+        """Thread 1: Process CHUNK_MS audio windows and store max frequency peak in global array."""
         chunk_buffer: List[float] = []
         
         while self.threads_running.is_set():
@@ -304,7 +343,7 @@ class ChannelToneDetector:
                     chunk_samples = np.array(chunk_buffer[:self.CHUNK_SIZE], dtype=np.float32)
                     chunk_buffer = chunk_buffer[self.CHUNK_SIZE:]
                     
-                    peaks = extract_peaks_from_chunk(chunk_samples, 50.0)
+                    peaks = extract_peaks_from_chunk(chunk_samples, self.CHUNK_MS)
                     
                     max_peak = None
                     if peaks:
@@ -363,10 +402,15 @@ class ChannelToneDetector:
                     tone_b_target = tone_def.get('tone_b', 0.0)
                     tone_a_range = tone_def.get('tone_a_range', 10)
                     tone_b_range = tone_def.get('tone_b_range', 10)
+
+                    if tone_a_range < self.default_range_hz:
+                        tone_a_range = self.default_range_hz
+                    if tone_b_range < self.default_range_hz:
+                        tone_b_range = self.default_range_hz
                     
-                    # Calculate number of elements (50ms per element)
-                    elements_a = int(round(tone_a_ms / 50.0))
-                    elements_b = int(round(tone_b_ms / 50.0))
+                    # Calculate number of elements (CHUNK_MS per element)
+                    elements_a = int(round(tone_a_ms / self.CHUNK_MS))
+                    elements_b = int(round(tone_b_ms / self.CHUNK_MS))
                     total_elements = elements_a + elements_b
                     
                     # Get recent peaks
@@ -404,6 +448,9 @@ class ChannelToneDetector:
                         # Ensure tones are different
                         if abs(tone_a_freq - tone_b_freq) <= 50:
                             continue
+
+                        tone_a_freq = round(tone_a_freq, 0)
+                        tone_b_freq = round(tone_b_freq, 0)
                         
                         self.last_tone_detection_time = time.time()
                         self._defined_tone_alert(tone_def, tone_a_freq, tone_b_freq)
@@ -412,7 +459,7 @@ class ChannelToneDetector:
                 
                 # Check for new tones
                 if self.detect_new_tones:
-                    elements_new = int(round(self.new_tone_length_ms / 50.0))
+                    elements_new = int(round(self.new_tone_length_ms / self.CHUNK_MS))
                     total_elements_new = elements_new * 2
                     
                     recent_peaks = self._get_recent_peaks(total_elements_new)
@@ -437,7 +484,9 @@ class ChannelToneDetector:
                             tone_b_similarity = self._calculate_similarity_percentage(
                                 tone_b_elements, tone_b_freq, self.new_tone_range_hz
                             )
-                            # Check if both meet 70% similarity threshold
+                            print(f"tone_a_freq: {tone_a_freq}, tone_b_freq: {tone_b_freq}")
+                            print(f"tone_a_similarity: {tone_a_similarity}, tone_b_similarity: {tone_b_similarity}")
+                            
                             if tone_a_similarity >= self.SIMILARITY_THRESHOLD and tone_b_similarity >= self.SIMILARITY_THRESHOLD:
                                 # Prevent duplicate detections
                                 min_interval = self.new_tone_length_seconds * 2 + 0.2
@@ -449,6 +498,9 @@ class ChannelToneDetector:
                                     continue
                                 
                                 self.last_tone_detection_time = time.time()
+                                
+                                tone_a_freq = round(tone_a_freq, 0)
+                                tone_b_freq = round(tone_b_freq, 0)
                                 
                                 print(
                                     f"[NEW TONE PAIR] Channel {self.channel_id}: "

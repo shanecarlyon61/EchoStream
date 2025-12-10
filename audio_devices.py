@@ -59,6 +59,10 @@ def select_output_device_for_channel(channel_index: int) -> Optional[int]:
     try:
         preferred_keywords = ["USB"]
         devices = list_output_devices()
+        if not devices:
+            print(f"[AUDIO] WARNING: No output devices found for channel {channel_index}")
+            return None
+        print(f"[AUDIO] Found {len(devices)} output device(s) for selection")
         ranked: List[Tuple[int, int]] = []  # (device_index, rank)
         for d in devices:
             idx = int(d["index"])
@@ -70,8 +74,10 @@ def select_output_device_for_channel(channel_index: int) -> Optional[int]:
             ranked.append((idx, rank))
         ranked.sort(key=lambda x: (x[1], x[0]))
         if ranked:
-            # Distribute channels across ranked devices
-            chosen = ranked[min(channel_index, len(ranked) - 1)][0]
+            # Distribute channels across ranked devices using modulo to wrap around
+            chosen_idx = channel_index % len(ranked)
+            chosen = ranked[chosen_idx][0]
+            print(f"[AUDIO] Selected output device {chosen} for channel index {channel_index} (from {len(ranked)} available devices)")
             return chosen
         # Fallback to default
         return pa.get_default_output_device_info().get("index")  # type: ignore
@@ -89,9 +95,20 @@ def open_output_stream(
     pa = _get_pa()
     if pa is None:
         return None, None
+    
+    # Check if device is available before attempting to open
+    try:
+        device_info = pa.get_device_info_by_index(device_index)
+        if device_info.get('maxOutputChannels', 0) == 0:
+            print(f"[AUDIO] ERROR: Device {device_index} has no output channels")
+            return None, None
+    except Exception as e:
+        print(f"[AUDIO] ERROR: Device {device_index} not available: {e}")
+        return None, None
+    
     try:
         stream = pa.open(
-            format=pyaudio.paInt16,  # 16-bit PCM
+            format=pyaudio.paInt16,
             channels=num_channels,
             rate=sample_rate,
             output=True,
@@ -140,6 +157,10 @@ def select_input_device_for_channel(channel_index: int) -> Optional[int]:
     try:
         preferred_keywords = ["USB"]
         devices = list_input_devices()
+        if not devices:
+            print(f"[AUDIO] WARNING: No input devices found for channel {channel_index}")
+            return None
+        print(f"[AUDIO] Found {len(devices)} input device(s) for selection")
         ranked: List[Tuple[int, int]] = []  # (device_index, rank)
         for d in devices:
             idx = int(d["index"])
@@ -151,13 +172,19 @@ def select_input_device_for_channel(channel_index: int) -> Optional[int]:
             ranked.append((idx, rank))
         ranked.sort(key=lambda x: (x[1], x[0]))
         if ranked:
-            # Distribute channels across ranked devices
-            chosen = ranked[min(channel_index, len(ranked) - 1)][0]
+            # Distribute channels across ranked devices using modulo to wrap around
+            chosen_idx = channel_index % len(ranked)
+            chosen = ranked[chosen_idx][0]
+            print(f"[AUDIO] Selected input device {chosen} for channel index {channel_index} (from {len(ranked)} available devices)")
             return chosen
         # Fallback to default
         try:
-            return pa.get_default_input_device_info().get("index")  # type: ignore
+            default_info = pa.get_default_input_device_info()
+            default_idx = default_info.get("index")
+            print(f"[AUDIO] Using default input device {default_idx} for channel index {channel_index}")
+            return default_idx  # type: ignore
         except Exception:
+            print(f"[AUDIO] WARNING: No default input device available for channel {channel_index}")
             return None
     except Exception as e:
         print(f"[AUDIO] ERROR: Input device selection failed: {e}")
@@ -173,6 +200,19 @@ def open_input_stream(
     pa = _get_pa()
     if pa is None:
         return None, None
+    
+    # Validate device exists and supports input before attempting to open
+    try:
+        device_info = pa.get_device_info_by_index(device_index)
+        max_input_channels = device_info.get('maxInputChannels', 0)
+        if max_input_channels == 0:
+            device_name = device_info.get('name', 'unknown')
+            print(f"[AUDIO] ERROR: Device {device_index} ({device_name}) has no input channels")
+            return None, None
+    except Exception as e:
+        print(f"[AUDIO] ERROR: Device {device_index} not available or invalid: {e}")
+        return None, None
+    
     try:
         stream = pa.open(
             format=pyaudio.paFloat32,  # 32-bit float like C code
