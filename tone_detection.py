@@ -675,7 +675,7 @@ class ChannelToneDetector:
             return result
     
     def _tone_detection_worker(self):
-        """Thread 2: Check global array and calculate similarity percentages for tone detection."""
+        """Thread 2: Check peak frequencies and detect tones (matching Android approach)."""
         DETECTION_INTERVAL = 0.1
         
         while self.threads_running.is_set():
@@ -710,24 +710,47 @@ class ChannelToneDetector:
                     tone_a_elements = recent_peaks[-total_elements:-elements_b] if elements_b > 0 else recent_peaks[-elements_a:]
                     tone_b_elements = recent_peaks[-elements_b:]
                     
-                    # Calculate similarity percentages
-                    tone_a_similarity = self._calculate_similarity_percentage(
-                        tone_a_elements, tone_a_target, tone_a_range
-                    )
-                    tone_b_similarity = self._calculate_similarity_percentage(
-                        tone_b_elements, tone_b_target, tone_b_range
-                    )
+                    # Match Android approach: Use peak frequencies directly (no averaging)
+                    # Check if peaks are within target range (matching Android frequency matching)
+                    tone_a_matches = 0
+                    tone_b_matches = 0
+                    tone_a_detected_freq = None
+                    tone_b_detected_freq = None
                     
-                    # Check if both tones meet 70% similarity threshold
-                    if tone_a_similarity >= self.SIMILARITY_THRESHOLD and tone_b_similarity >= self.SIMILARITY_THRESHOLD:
+                    # Check tone A: count how many peaks are within range, use most recent valid peak
+                    for freq in reversed(tone_a_elements):
+                        if freq is not None:
+                            if abs(freq - tone_a_target) <= tone_a_range:
+                                tone_a_matches += 1
+                                if tone_a_detected_freq is None:
+                                    # Use the most recent peak frequency (matching Android - direct peak value)
+                                    tone_a_detected_freq = freq
+                    
+                    # Check tone B: count how many peaks are within range, use most recent valid peak
+                    for freq in reversed(tone_b_elements):
+                        if freq is not None:
+                            if abs(freq - tone_b_target) <= tone_b_range:
+                                tone_b_matches += 1
+                                if tone_b_detected_freq is None:
+                                    # Use the most recent peak frequency (matching Android - direct peak value)
+                                    tone_b_detected_freq = freq
+                    
+                    # Require at least 70% of peaks to be in range (matching previous threshold)
+                    tone_a_match_ratio = tone_a_matches / len([f for f in tone_a_elements if f is not None]) if len([f for f in tone_a_elements if f is not None]) > 0 else 0
+                    tone_b_match_ratio = tone_b_matches / len([f for f in tone_b_elements if f is not None]) if len([f for f in tone_b_elements if f is not None]) > 0 else 0
+                    
+                    if tone_a_match_ratio >= self.SIMILARITY_THRESHOLD and tone_b_match_ratio >= self.SIMILARITY_THRESHOLD:
+                        if tone_a_detected_freq is None or tone_b_detected_freq is None:
+                            continue
+                        
                         # Prevent duplicate detections
                         min_interval = (tone_a_ms + tone_b_ms) / 1000.0
                         if time.time() - self.last_tone_detection_time < min_interval:
                             continue
                         
-                        # Get average frequencies
-                        tone_a_freq = self._get_average_frequency(tone_a_elements, tone_a_target, tone_a_range)
-                        tone_b_freq = self._get_average_frequency(tone_b_elements, tone_b_target, tone_b_range)
+                        # Use detected peak frequencies directly (matching Android - no averaging)
+                        tone_a_freq = tone_a_detected_freq
+                        tone_b_freq = tone_b_detected_freq
                         
                         # Apply frequency filters
                         if self._is_frequency_filtered(tone_a_freq) or self._is_frequency_filtered(tone_b_freq):
@@ -737,15 +760,16 @@ class ChannelToneDetector:
                         if abs(tone_a_freq - tone_b_freq) <= 50:
                             continue
 
-                        tone_a_freq = round(tone_a_freq, 0)
-                        tone_b_freq = round(tone_b_freq, 0)
+                        # Round to 1 decimal place (matching Android precision)
+                        tone_a_freq = round(tone_a_freq, 1)
+                        tone_b_freq = round(tone_b_freq, 1)
                         
                         self.last_tone_detection_time = time.time()
                         self._defined_tone_alert(tone_def, tone_a_freq, tone_b_freq)
                         self._defined_tone_passthrough(tone_def)
                         self._defined_tone_recording(tone_def)
                 
-                # Check for new tones
+                # Check for new tones (using direct peak approach)
                 if self.detect_new_tones:
                     elements_new = int(round(self.new_tone_length_ms / self.hop_time_ms))
                     total_elements_new = elements_new * 2
@@ -756,26 +780,34 @@ class ChannelToneDetector:
                         tone_a_elements = recent_peaks[-total_elements_new:-elements_new]
                         tone_b_elements = recent_peaks[-elements_new:]
                         
-                        # Find dominant frequency in each window
-                        tone_a_freq = self._get_dominant_frequency(tone_a_elements)
-                        tone_b_freq = self._get_dominant_frequency(tone_b_elements)
+                        # Match Android: Use most recent peak frequency directly
+                        # Find most recent valid peak in each window
+                        tone_a_freq = None
+                        tone_b_freq = None
+                        
+                        for freq in reversed(tone_a_elements):
+                            if freq is not None:
+                                tone_a_freq = freq
+                                break
+                        
+                        for freq in reversed(tone_b_elements):
+                            if freq is not None:
+                                tone_b_freq = freq
+                                break
                         
                         if tone_a_freq and tone_b_freq:
                             # Ensure tones are different
                             if abs(tone_a_freq - tone_b_freq) <= 50:
                                 continue
                             
-                            # Calculate similarity percentages using dominant frequencies
-                            tone_a_similarity = self._calculate_similarity_percentage(
-                                tone_a_elements, tone_a_freq, self.new_tone_range_hz
-                            )
-                            tone_b_similarity = self._calculate_similarity_percentage(
-                                tone_b_elements, tone_b_freq, self.new_tone_range_hz
-                            )
-                            print(f"tone_a_freq: {tone_a_freq}, tone_b_freq: {tone_b_freq}")
-                            print(f"tone_a_similarity: {tone_a_similarity}, tone_b_similarity: {tone_b_similarity}")
+                            # Check stability: count peaks within range of detected frequency
+                            tone_a_stable = sum(1 for f in tone_a_elements if f is not None and abs(f - tone_a_freq) <= self.new_tone_range_hz)
+                            tone_b_stable = sum(1 for f in tone_b_elements if f is not None and abs(f - tone_b_freq) <= self.new_tone_range_hz)
                             
-                            if tone_a_similarity >= self.SIMILARITY_THRESHOLD and tone_b_similarity >= self.SIMILARITY_THRESHOLD:
+                            tone_a_stability = tone_a_stable / len([f for f in tone_a_elements if f is not None]) if len([f for f in tone_a_elements if f is not None]) > 0 else 0
+                            tone_b_stability = tone_b_stable / len([f for f in tone_b_elements if f is not None]) if len([f for f in tone_b_elements if f is not None]) > 0 else 0
+                            
+                            if tone_a_stability >= self.SIMILARITY_THRESHOLD and tone_b_stability >= self.SIMILARITY_THRESHOLD:
                                 # Prevent duplicate detections
                                 min_interval = self.new_tone_length_seconds * 2 + 0.2
                                 if time.time() - self.last_tone_detection_time < min_interval:
@@ -787,15 +819,16 @@ class ChannelToneDetector:
                                 
                                 self.last_tone_detection_time = time.time()
                                 
-                                tone_a_freq = round(tone_a_freq, 0)
-                                tone_b_freq = round(tone_b_freq, 0)
+                                # Round to 1 decimal place (matching Android precision)
+                                tone_a_freq = round(tone_a_freq, 1)
+                                tone_b_freq = round(tone_b_freq, 1)
                                 
                                 print(
                                     f"[NEW TONE PAIR] Channel {self.channel_id}: "
                                     f"A={tone_a_freq:.1f} Hz, B={tone_b_freq:.1f} Hz "
                                     f"(each {self.new_tone_length_seconds:.2f} s, "
                                     f"±{self.new_tone_range_hz} Hz stable, "
-                                    f"similarity: A={tone_a_similarity:.1%}, B={tone_b_similarity:.1%})"
+                                    f"stability: A={tone_a_stability:.1%}, B={tone_b_stability:.1%})"
                                 )
                                 
                                 if MQTT_AVAILABLE:
