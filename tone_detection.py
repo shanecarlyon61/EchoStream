@@ -25,6 +25,208 @@ except ImportError:
 
 SAMPLE_RATE = 48000
 
+
+class STFT:
+    """
+    Short Time Fourier Transform with overlapping windows (matching Android approach).
+    Uses sliding window buffer with hopLen for overlap control.
+    """
+    def __init__(self, fft_len: int = 8192, hop_len: int = 4096, sample_rate: int = SAMPLE_RATE, 
+                 window_name: str = "Hanning", n_average: int = 1):
+        """
+        Initialize STFT.
+        
+        Args:
+            fft_len: FFT length (must be power of 2, matching Android)
+            hop_len: Hop length for overlap (typically fft_len/2 for 50% overlap)
+            sample_rate: Sample rate in Hz
+            window_name: Window function name ("Hanning", "Blackman", etc.)
+            n_average: Number of FFT results to average
+        """
+        if (fft_len & (fft_len - 1)) != 0:
+            raise ValueError("fft_len must be a power of 2")
+        
+        self.fft_len = fft_len
+        self.hop_len = hop_len
+        self.sample_rate = sample_rate
+        self.n_average = n_average
+        
+        # Buffer for accumulating input samples
+        self.spectrum_amp_in = np.zeros(fft_len, dtype=np.float32)
+        self.spectrum_amp_pt = 0
+        
+        # Output arrays
+        self.out_len = fft_len // 2 + 1
+        self.spectrum_amp_out_cum = np.zeros(self.out_len, dtype=np.float64)
+        self.spectrum_amp_out = np.zeros(self.out_len, dtype=np.float64)
+        self.spectrum_amp_out_db = np.zeros(self.out_len, dtype=np.float64)
+        
+        self.n_analysed = 0
+        
+        # Initialize window function
+        self.window = self._init_window_function(fft_len, window_name)
+        
+        # Window normalization factor (matching Android)
+        window_sum = np.sum(self.window)
+        self.window_normalize = fft_len / window_sum
+        
+        # Energy normalization factor
+        window_energy = np.sum(self.window ** 2)
+        self.wnd_energy_factor = fft_len / window_energy
+        
+        # RMS calculation
+        self.cum_rms = 0.0
+        self.cnt_rms = 0
+        self.out_rms = 0.0
+        
+        # Peak detection results
+        self.max_amp_freq = float('nan')
+        self.max_amp_db = float('nan')
+    
+    def _init_window_function(self, fft_len: int, window_name: str) -> np.ndarray:
+        """Initialize window function (matching Android STFT)."""
+        if window_name == "Hanning":
+            window = np.hanning(fft_len)
+            # Match Android: 0.5*(1-cos(2*PI*i/(len-1)))*2
+            window = 0.5 * (1 - np.cos(2 * np.pi * np.arange(fft_len) / (fft_len - 1))) * 2
+        elif window_name == "Blackman":
+            # Match Android: 0.42-0.5*cos(...)+0.08*cos(...)
+            i = np.arange(fft_len)
+            window = (0.42 - 0.5 * np.cos(2 * np.pi * i / (fft_len - 1)) + 
+                     0.08 * np.cos(4 * np.pi * i / (fft_len - 1)))
+        else:
+            # Default to Hanning
+            window = np.hanning(fft_len)
+        
+        return window.astype(np.float32)
+    
+    def feed_data(self, samples: np.ndarray) -> None:
+        """
+        Feed audio samples into STFT buffer (matching Android feedData approach).
+        
+        Args:
+            samples: Audio samples as float32 array (normalized -1.0 to 1.0)
+        """
+        ds_len = len(samples)
+        ds_pt = 0
+        
+        while ds_pt < ds_len:
+            # Fill buffer
+            while self.spectrum_amp_pt < self.fft_len and ds_pt < ds_len:
+                s = float(samples[ds_pt])
+                self.spectrum_amp_in[self.spectrum_amp_pt] = s
+                self.spectrum_amp_pt += 1
+                ds_pt += 1
+                
+                # Accumulate RMS
+                self.cum_rms += s * s
+                self.cnt_rms += 1
+            
+            # When buffer is full, perform FFT
+            if self.spectrum_amp_pt == self.fft_len:
+                # Apply window
+                windowed = self.spectrum_amp_in * self.window * self.window_normalize
+                
+                # Perform FFT
+                fft_result = rfft(windowed)
+                
+                # Convert to power spectrum (matching Android fftToAmp)
+                # Android uses: (re^2 + im^2) * scaler where scaler = 2*2/(N*N)
+                scaler = 2.0 * 2.0 / (self.fft_len * self.fft_len)
+                spectrum_amp_tmp = np.abs(fft_result) ** 2 * scaler
+                
+                # Accumulate
+                self.spectrum_amp_out_cum += spectrum_amp_tmp
+                self.n_analysed += 1
+                
+                # Slide window (copy remaining data)
+                if self.hop_len < self.fft_len:
+                    remaining = self.fft_len - self.hop_len
+                    self.spectrum_amp_in[:remaining] = self.spectrum_amp_in[self.hop_len:]
+                    self.spectrum_amp_pt = remaining
+                else:
+                    self.spectrum_amp_pt = 0
+    
+    def get_spectrum_amp_db(self) -> np.ndarray:
+        """
+        Get spectrum amplitude in dB (matching Android getSpectrumAmpDB).
+        Returns averaged spectrum if n_analysed >= n_average.
+        """
+        if self.n_analysed >= self.n_average:
+            # Average the accumulated spectrum
+            self.spectrum_amp_out = self.spectrum_amp_out_cum / self.n_analysed
+            
+            # Convert to dB (matching Android: 10.0 * log10 for power spectrum)
+            self.spectrum_amp_out_db = 10.0 * np.log10(
+                np.maximum(self.spectrum_amp_out, 1e-10)
+            )
+            
+            # Reset accumulation
+            self.spectrum_amp_out_cum.fill(0.0)                              
+            self.n_analysed = 0
+        
+        return self.spectrum_amp_out_db
+    
+    def calculate_peak(self) -> None:
+        """
+        Calculate peak frequency using quadratic interpolation (matching Android calculatePeak).
+        """
+        self.get_spectrum_amp_db()
+        
+        # Find maximum peak (matching Android)
+        min_db_threshold = 20 * np.log10(0.125 / 32768)  # ≈ -88.3 dB
+        self.max_amp_db = min_db_threshold
+        max_amp_idx = 0
+        
+        for i in range(1, len(self.spectrum_amp_out_db)):
+            if self.spectrum_amp_out_db[i] > self.max_amp_db:
+                self.max_amp_db = self.spectrum_amp_out_db[i]
+                max_amp_idx = i
+        
+        # Initial frequency calculation
+        self.max_amp_freq = max_amp_idx * self.sample_rate / self.fft_len
+        
+        # Quadratic interpolation for better accuracy (matching Android)
+        freq_resolution = self.sample_rate / self.fft_len
+        if freq_resolution < self.max_amp_freq < (self.sample_rate / 2 - freq_resolution):
+            id = int(round(self.max_amp_freq / self.sample_rate * self.fft_len))
+            
+            if 1 <= id < len(self.spectrum_amp_out_db) - 1:
+                x1 = self.spectrum_amp_out_db[id - 1]
+                x2 = self.spectrum_amp_out_db[id]
+                x3 = self.spectrum_amp_out_db[id + 1]
+                
+                c = x2
+                a = (x3 + x1) / 2.0 - x2
+                b = (x3 - x1) / 2.0
+                
+                if a < 0:  # Ensure it's a peak (parabola opens downward)
+                    x_peak = -b / (2.0 * a)
+                    if abs(x_peak) < 1.0:
+                        self.max_amp_freq += x_peak * freq_resolution
+                        self.max_amp_db = (4 * a * c - b * b) / (4 * a)
+    
+    def get_rms(self) -> float:
+        """Get RMS value (matching Android getRMS)."""
+        if self.cnt_rms > 8000 / 30:
+            self.out_rms = np.sqrt(self.cum_rms / self.cnt_rms * 2.0)
+            self.cum_rms = 0.0
+            self.cnt_rms = 0
+        return self.out_rms
+    
+    def n_elem_spectrum_amp(self) -> int:
+        """Get number of accumulated FFT results."""
+        return self.n_analysed
+    
+    def clear(self) -> None:
+        """Clear internal buffers."""
+        self.spectrum_amp_pt = 0
+        self.spectrum_amp_in.fill(0.0)
+        self.spectrum_amp_out.fill(0.0)
+        self.spectrum_amp_out_db.fill(-np.inf)
+        self.spectrum_amp_out_cum.fill(0.0)
+        self.n_analysed = 0
+
 MAX_BUFFER_SECONDS = 10
 MAX_BUFFER_SAMPLES = int(SAMPLE_RATE * MAX_BUFFER_SECONDS)
 
@@ -309,11 +511,28 @@ class ChannelToneDetector:
         self.channel_id = channel_id
         self.tone_definitions = tone_definitions
         
-        # Global array: 100 elements for 10s audio (100ms per element)
-        self.CHUNK_MS = 100.0
-        self.CHUNK_SIZE = int(SAMPLE_RATE * self.CHUNK_MS / 1000.0)
+        # STFT configuration (matching Android approach)
+        self.FFT_LEN = 8192  # Power of 2, matching Android default
+        self.HOP_LEN = 4096  # 50% overlap
+        self.N_AVERAGE = 1  # Number of FFT results to average
+        self.WINDOW_NAME = "Hanning"
+        
+        # Initialize STFT (matching Android STFT class)
+        self.stft = STFT(
+            fft_len=self.FFT_LEN,
+            hop_len=self.HOP_LEN,
+            sample_rate=SAMPLE_RATE,
+            window_name=self.WINDOW_NAME,
+            n_average=self.N_AVERAGE
+        )
+        
+        # Time resolution: STFT produces results approximately every hop_len/sample_rate seconds
+        self.hop_time_ms = (self.HOP_LEN / SAMPLE_RATE) * 1000.0
+        
+        # Global array: Store peak frequencies at each STFT update
+        # Estimate size based on MAX_BUFFER_SECONDS
         self.MAX_FREQUENCY_PEAKS_SIZE = max(
-            1, int((MAX_BUFFER_SECONDS * 1000) / self.CHUNK_MS)
+            1, int((MAX_BUFFER_SECONDS * 1000) / self.hop_time_ms)
         )
         self.max_frequency_peaks: List[Optional[float]] = [None] * self.MAX_FREQUENCY_PEAKS_SIZE
         self.max_frequency_peaks_mutex = threading.Lock()
@@ -343,12 +562,9 @@ class ChannelToneDetector:
         self.new_tone_range_hz = new_tone_config.get("new_tone_range_hz", 3)
         self.new_tone_config = new_tone_config
 
-        self.fft_resolution_hz = calculate_fft_resolution_hz(
-            self.CHUNK_SIZE, SAMPLE_RATE
-        )
-        self.default_range_hz = calculate_default_range_hz(
-            self.CHUNK_SIZE, SAMPLE_RATE, multiplier=1.5
-        )
+        # FFT resolution (matching Android approach)
+        self.fft_resolution_hz = SAMPLE_RATE / self.FFT_LEN
+        self.default_range_hz = self.fft_resolution_hz * 1.5
 
         if self.new_tone_range_hz < self.default_range_hz:
             print(
@@ -397,26 +613,29 @@ class ChannelToneDetector:
         print(f"[TONE DETECT] Started tone detection thread for channel {self.channel_id}")
     
     def _peak_storage_worker(self):
-        """Thread 1: Process CHUNK_MS audio windows and store max frequency peak in global array."""
-        chunk_buffer: List[float] = []
-        
+        """Thread 1: Feed audio samples to STFT and store peak frequency when FFT result is ready (matching Android approach)."""
         while self.threads_running.is_set():
             try:
                 try:
                     audio_samples = self.audio_queue.get(timeout=0.1)
-                    chunk_buffer.extend(audio_samples.tolist())
                 except queue.Empty:
                     continue
                 
-                while len(chunk_buffer) >= self.CHUNK_SIZE:
-                    chunk_samples = np.array(chunk_buffer[:self.CHUNK_SIZE], dtype=np.float32)
-                    chunk_buffer = chunk_buffer[self.CHUNK_SIZE:]
+                # Feed samples to STFT (matching Android stft.feedData approach)
+                self.stft.feed_data(audio_samples)
+                
+                # Check if we have enough accumulated FFT results (matching Android nElemSpectrumAmp check)
+                if self.stft.n_elem_spectrum_amp() >= self.N_AVERAGE:
+                    # Calculate peak frequency (matching Android calculatePeak)
+                    self.stft.calculate_peak()
                     
-                    peaks = extract_peaks_from_chunk(chunk_samples, self.CHUNK_MS)
-                    
+                    # Store the peak frequency (only if valid)
                     max_peak = None
-                    if peaks:
-                        max_peak = max(peaks)
+                    if not np.isnan(self.stft.max_amp_freq) and self.stft.max_amp_freq > 0:
+                        # Apply minimum threshold check (matching Android)
+                        min_db_threshold = 20 * np.log10(0.125 / 32768)
+                        if self.stft.max_amp_db > min_db_threshold:
+                            max_peak = self.stft.max_amp_freq
                     
                     with self.max_frequency_peaks_mutex:
                         self.max_frequency_peaks[self.max_frequency_peaks_index] = max_peak
@@ -477,9 +696,9 @@ class ChannelToneDetector:
                     if tone_b_range < self.default_range_hz:
                         tone_b_range = self.default_range_hz
                     
-                    # Calculate number of elements (CHUNK_MS per element)
-                    elements_a = int(round(tone_a_ms / self.CHUNK_MS))
-                    elements_b = int(round(tone_b_ms / self.CHUNK_MS))
+                    # Calculate number of elements (hop_time_ms per element, matching STFT update rate)
+                    elements_a = int(round(tone_a_ms / self.hop_time_ms))
+                    elements_b = int(round(tone_b_ms / self.hop_time_ms))
                     total_elements = elements_a + elements_b
                     
                     # Get recent peaks
@@ -528,7 +747,7 @@ class ChannelToneDetector:
                 
                 # Check for new tones
                 if self.detect_new_tones:
-                    elements_new = int(round(self.new_tone_length_ms / self.CHUNK_MS))
+                    elements_new = int(round(self.new_tone_length_ms / self.hop_time_ms))
                     total_elements_new = elements_new * 2
                     
                     recent_peaks = self._get_recent_peaks(total_elements_new)
