@@ -1088,15 +1088,29 @@ class UDPPlayer:
                 if HAS_PASSTHROUGH and global_passthrough_manager:
                     try:
                         global_passthrough_manager.cleanup_expired_sessions()
-                        if global_passthrough_manager.is_active(channel_id):
+                        is_passthrough_active = global_passthrough_manager.is_active(channel_id)
+                        if chunk_count <= 5:
+                            print(f"[PASSTHROUGH DEBUG] Channel {channel_id}: is_active={is_passthrough_active}")
+                        if is_passthrough_active:
                             try:
-                                global_passthrough_manager.route_audio(
-                                    channel_id, audio_chunk
+                                # Use filtered_audio to match what's being detected
+                                success = global_passthrough_manager.route_audio(
+                                    channel_id, filtered_audio
                                 )
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                                if chunk_count <= 5:
+                                    print(f"[PASSTHROUGH DEBUG] Channel {channel_id}: route_audio returned success={success}")
+                                if chunk_count <= 5 and not success:
+                                    print(f"[PASSTHROUGH] WARNING: Failed to route audio for {channel_id}")
+                            except Exception as e:
+                                if chunk_count <= 10:
+                                    print(f"[PASSTHROUGH] ERROR routing audio for {channel_id}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                    except Exception as e:
+                        if chunk_count <= 10:
+                            print(f"[PASSTHROUGH] ERROR in passthrough check for {channel_id}: {e}")
+                        import traceback
+                        traceback.print_exc()
 
                 # Handle recording (in tone detection thread, not broadcasting)
                 if HAS_RECORDING and global_recording_manager:
