@@ -353,87 +353,79 @@ class PassthroughManager:
                             f"[PASSTHROUGH] Dropped {dropped} audio chunks from queue for {source_channel_id}"
                         )
 
-                # Process chunks - write continuously without gaps
-                chunks_written = 0
-                
-                # Write all available chunks in the queue to minimize latency
-                # Don't break out of the loop until queue is empty or error occurs
-                # Use non-blocking get to avoid delays
-                while True:
-                    try:
-                        pcm_bytes = queue.get_nowait()
-                        if not session.output_stream.is_active():
-                            try:
-                                session.output_stream.start_stream()
-                                print(
-                                    f"[PASSTHROUGH] Started output stream for {source_channel_id}"
-                                )
-                            except Exception as e:
-                                if write_count % 100 == 0:
-                                    print(
-                                        f"[PASSTHROUGH] ERROR: Failed to start stream: {e}"
-                                    )
-                                break
-
-                        # Write entire chunk (1920 samples = 3840 bytes) in one go
-                        # This matches the buffer size exactly and eliminates fragmentation
-                        pcm_len = len(pcm_bytes)
-                        
-                        # Ensure we have a complete chunk (1920 samples = 3840 bytes)
-                        if pcm_len != bytes_per_write:
-                            # If chunk size doesn't match, log warning but still try to write
+                # CRITICAL FIX: Write only ONE chunk per iteration to maintain smooth playback
+                # Writing multiple chunks in a loop causes bursts that create choppy "phone ringing" audio
+                try:
+                    pcm_bytes = queue.get_nowait()
+                    
+                    if not session.output_stream.is_active():
+                        try:
+                            session.output_stream.start_stream()
+                            print(
+                                f"[PASSTHROUGH] Started output stream for {source_channel_id}"
+                            )
+                        except Exception as e:
                             if write_count % 100 == 0:
                                 print(
-                                    f"[PASSTHROUGH] WARNING: Unexpected chunk size {pcm_len} bytes (expected {bytes_per_write}) for {source_channel_id}"
+                                    f"[PASSTHROUGH] ERROR: Failed to start stream: {e}"
                                 )
-                        
-                        try:
-                            # CRITICAL: Rate-limit writes to match hardware playback rate
-                            # At 48kHz, 1920 samples = 40ms - we must write at this exact rate
-                            current_time = time.time()
-                            elapsed = current_time - last_write_time
-                            
-                            # If we're ahead of schedule, wait to match hardware rate
-                            if elapsed < TIME_PER_CHUNK:
-                                sleep_time = TIME_PER_CHUNK - elapsed
-                                if sleep_time > 0.0001:  # Only sleep if > 0.1ms
-                                    time.sleep(sleep_time)
-                                    current_time = time.time()  # Update time after sleep
-                            # If elapsed >= TIME_PER_CHUNK, we're at or behind schedule
-                            # Write immediately to catch up
-                            
-                            # Write the entire chunk at once for optimal timing
-                            session.output_stream.write(
-                                pcm_bytes, exception_on_underflow=False
-                            )
-                            write_count += 1
-                            chunks_written += 1
-                            last_write_time = current_time
-                            
-                            if write_count <= 10 or write_count % 500 == 0:
-                                print(
-                                    f"[PASSTHROUGH] Wrote audio chunk #{write_count} for {source_channel_id} ({pcm_len} bytes, queue={queue.qsize()}, elapsed={elapsed*1000:.2f}ms)"
-                                )
-                        except Exception as e:
-                            # Underflow or other write error - log and continue to next chunk
-                            if write_count % 50 == 0:  # Log more frequently for errors
-                                print(
-                                    f"[PASSTHROUGH] ERROR: Failed to write audio: {e}"
-                                )
-                            # Update time even on error to maintain timing
-                            last_write_time = time.time()
-                            # Continue with next chunk to avoid gaps
+                            time.sleep(0.01)
                             continue
-                    except queue.Empty:
-                        break
 
-                # Only sleep if queue was empty - this keeps latency low when data is available
-                if chunks_written == 0:
+                    # Write entire chunk (1920 samples = 3840 bytes) in one go
+                    # This matches the buffer size exactly and eliminates fragmentation
+                    pcm_len = len(pcm_bytes)
+                    
+                    # Ensure we have a complete chunk (1920 samples = 3840 bytes)
+                    if pcm_len != bytes_per_write:
+                        # If chunk size doesn't match, log warning but still try to write
+                        if write_count % 100 == 0:
+                            print(
+                                f"[PASSTHROUGH] WARNING: Unexpected chunk size {pcm_len} bytes (expected {bytes_per_write}) for {source_channel_id}"
+                            )
+                    
+                    try:
+                        # CRITICAL: Rate-limit writes to match hardware playback rate
+                        # At 48kHz, 1920 samples = 40ms - we must write at this exact rate
+                        current_time = time.time()
+                        elapsed = current_time - last_write_time
+                        
+                        # If we're ahead of schedule, wait to match hardware rate
+                        # This prevents writing chunks too quickly and causing choppy audio
+                        if elapsed < TIME_PER_CHUNK:
+                            sleep_time = TIME_PER_CHUNK - elapsed
+                            if sleep_time > 0.0001:  # Only sleep if > 0.1ms
+                                time.sleep(sleep_time)
+                                current_time = time.time()  # Update time after sleep
+                        # If elapsed >= TIME_PER_CHUNK, we're at or behind schedule
+                        # Write immediately to catch up
+                        
+                        # Write the entire chunk at once for optimal timing
+                        session.output_stream.write(
+                            pcm_bytes, exception_on_underflow=False
+                        )
+                        write_count += 1
+                        last_write_time = current_time
+                        
+                        if write_count <= 10 or write_count % 500 == 0:
+                            print(
+                                f"[PASSTHROUGH] Wrote audio chunk #{write_count} for {source_channel_id} ({pcm_len} bytes, queue={queue.qsize()}, elapsed={elapsed*1000:.2f}ms)"
+                            )
+                    except Exception as e:
+                        # Underflow or other write error - log and continue
+                        if write_count % 50 == 0:  # Log more frequently for errors
+                            print(
+                                f"[PASSTHROUGH] ERROR: Failed to write audio: {e}"
+                            )
+                        # Update time even on error to maintain timing
+                        last_write_time = time.time()
+                        # Sleep briefly before retrying to avoid tight error loop
+                        time.sleep(0.001)
+                except queue.Empty:
                     # No data available - sleep briefly to avoid busy-waiting
                     # But don't sleep too long or we'll miss timing
                     time.sleep(0.001)  # 1ms sleep when no data
-                # If we wrote chunks, immediately check for more (no sleep) to maintain continuity
-                # The rate limiting above ensures we write at exactly the hardware playback rate
+                    # Don't update last_write_time here - maintain timing based on last actual write
             except Exception as e:
                 if write_count % 100 == 0:
                     print(f"[PASSTHROUGH] ERROR in write worker: {e}")
